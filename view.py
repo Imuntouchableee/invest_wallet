@@ -1,16 +1,22 @@
 import sqlite3
 import flet as ft
+import matplotlib
+matplotlib.use("Agg")       # переключаемся на безголовый бекенд
+import matplotlib.pyplot as plt
+import os
+from flet import Image
 from models import User, Asset
 from models import session
-from api import mainn
-
+from api import mainn, fetch_last_20_prices
+from ml import predict_future_price
 data = {}
+user_name = str()
 
 top_25_expensive_coins = [
-    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'TON/USDT', 'MKR/USDT',
+    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'TON/USDT',
     'LTC/USDT', 'BCH/USDT', 'DOT/USDT', 'LINK/USDT', 'AAVE/USDT',
     'ATOM/USDT', 'FIL/USDT', 'NEAR/USDT', 'SOL/USDT', 'AVAX/USDT',
-    'ALGO/USDT', 'FTM/USDT', 'MANA/USDT', 'SAND/USDT',
+    'ALGO/USDT', 'MANA/USDT', 'SAND/USDT',
     'XTZ/USDT', 'ICP/USDT', 'GRT/USDT', 'EGLD/USDT'
 ]
 
@@ -102,7 +108,7 @@ def main(page: ft.Page):
                     new_asset_value = float(asset_value_field.value)
 
                     if new_asset_value <= 0:
-                        error_message.value = "Сумма должна быть больше 0 рублей."
+                        error_message.value = "Сумма должна быть больше 0 долларов."
                         error_message.visible = True
                         page.update()
                         return
@@ -154,7 +160,7 @@ def main(page: ft.Page):
 
             # Поле для ввода суммы
             asset_value_field = ft.TextField(
-                label="Сумма (в рублях)",
+                label="Сумма ($)",
                 on_change=update_quantity,
             )
 
@@ -274,7 +280,7 @@ def main(page: ft.Page):
         def top_up_balance():
             def confirm_top_up(e):
                 try:
-                    top_up_amount = float(balance_field.value)
+                    top_up_amount = round(float(balance_field.value), 1)
                     if top_up_amount <= 0:
                         raise ValueError("Сумма должна быть положительной")
                     user.balance += top_up_amount
@@ -293,7 +299,7 @@ def main(page: ft.Page):
             # Поле для ввода суммы
             balance_field = ft.TextField(
                 label="Сумма пополнения",
-                hint_text="Введите сумму (рубли)",
+                hint_text="Введите сумму ($)",
                 keyboard_type="number",
             )
 
@@ -371,7 +377,8 @@ def main(page: ft.Page):
 
             def update_asset_prices(data):
                 """Обновляет цены в таблице assets на основе новых данных."""
-                assets = session.query(Asset).all()
+                user = session.query(User).filter_by(name=user_name).first()
+                assets = session.query(Asset).filter_by(user_id=user.id).all()
                 for asset in assets:
                     coin_name = asset.coin_name
                     if coin_name in data:
@@ -380,7 +387,7 @@ def main(page: ft.Page):
                         average_price = sum(prices.values()) / len(prices)
 
                         # Рассчитываем стоимость актива
-                        asset.value_rub = asset.quantity * average_price
+                        asset.value_rub = round((asset.quantity * average_price), 1)
                     else:
                         print(f"Монета {coin_name} не найдена в обновленных данных!")
 
@@ -390,7 +397,8 @@ def main(page: ft.Page):
             def refresh_asset_list():
                 """Обновляет список активов на экране."""
                 # Получаем актуальные данные из базы
-                updated_assets = session.query(Asset).all()
+                user = session.query(User).filter_by(name=user_name).first()
+                updated_assets = session.query(Asset).filter_by(user_id=user.id).all()
 
                 # Очищаем предыдущий список активов
                 asset_list.controls.clear()
@@ -399,7 +407,7 @@ def main(page: ft.Page):
                         [
                             ft.Text("Монета", size=18, weight="bold", expand=1, text_align="left"),
                             ft.Text("Количество", size=18, weight="bold", expand=1, text_align="left"),
-                            ft.Text("Стоимость (₽)", size=18, weight="bold", expand=1, text_align="left"),
+                            ft.Text("Стоимость ($)", size=18, weight="bold", expand=1, text_align="left"),
                             ft.Text("Действие", size=18, weight="bold", expand=1, text_align="center"),
                         ],
                         alignment="spaceBetween",
@@ -413,7 +421,7 @@ def main(page: ft.Page):
                         [
                             ft.Text(asset.coin_name, size=16, expand=1, text_align="start"),  # Первая колонка
                             ft.Text(str(asset.quantity), size=16, expand=1, text_align="start"),  # Вторая колонка
-                            ft.Text(f"{asset.value_rub} ₽", size=16, expand=1, text_align="start"),  # Третья колонка
+                            ft.Text(f"{round(asset.value_rub, 1)} $", size=16, expand=1, text_align="start"),  # Третья колонка
                             ft.Row(
                                 [
                                     ft.ElevatedButton(
@@ -427,6 +435,12 @@ def main(page: ft.Page):
                                         on_click=lambda e, a_id=asset.id: delete_asset(a_id),
                                         bgcolor=ft.colors.RED_500,
                                         color=ft.colors.BLACK,
+                                    ),
+                                    ft.ElevatedButton(
+                                        text="Анализ",
+                                        on_click=lambda e, a=asset: show_analysis_dialog(a),
+                                        bgcolor=ft.colors.BLUE_700,
+                                        color=ft.colors.WHITE,
                                     ),
                                 ],
                                 alignment="center",
@@ -453,15 +467,44 @@ def main(page: ft.Page):
 
         def create_summary_page():
             """Создает страницу со сводом по монетам на разных биржах."""
-            def refresh_summary():
+            def refresh_summary(e):
                 """Обновляет данные на странице свода."""
+                # Показать окно загрузки
+                loading_dialog = ft.AlertDialog(
+                    title=ft.Text("Обновление данных"),
+                    content=ft.Row(
+                        [
+                            ft.ProgressRing(),
+                            ft.Text("Загрузка новых данных, пожалуйста, подождите...", expand=1),
+                        ],
+                        alignment="center",
+                    ),
+                )
+                page.dialog = loading_dialog
+                loading_dialog.open = True
+                page.update()
+
                 try:
-                    # Получаем новые данные (здесь может быть вызов вашей функции обновления)
+                    # Получаем новые данные
                     nonlocal data
                     data = mainn()
 
                     # Очищаем старое содержимое
                     summary_table.controls.clear()
+
+                    # Добавляем заголовки
+                    summary_table.controls.extend([
+                        ft.Row(
+                            [
+                                ft.Text("Монета", size=18, weight="bold", expand=1, text_align="start"),
+                                ft.Text("Биржа", size=18, weight="bold", expand=1, text_align="start"),
+                                ft.Text("Цена ($)", size=18, weight="bold", expand=1, text_align="start"),
+                            ],
+                            alignment="spaceBetween",
+                            height=50,
+                        ),
+                        ft.Divider(thickness=1, opacity=0.2),
+                    ])
 
                     # Добавляем обновленные данные
                     for coin_name, prices in data.items():
@@ -471,17 +514,20 @@ def main(page: ft.Page):
                                     [
                                         ft.Text(coin_name, expand=1, text_align="start"),
                                         ft.Text(exchange, expand=1, text_align="start"),
-                                        ft.Text(f"{price} ₽", expand=1, text_align="start"),
+                                        ft.Text(f"{price} $", expand=1, text_align="start"),
                                     ],
                                     alignment="spaceBetween",
                                     height=50,
                                 )
                             )
-
-                    # Обновляем интерфейс
+                    # Закрываем окно загрузки
+                    loading_dialog.open = False
                     page.update()
                 except Exception as e:
-                    # Обработчик ошибок
+                    # Закрываем окно загрузки при ошибке
+                    loading_dialog.open = False
+                    page.update()
+                    
                     error_snackbar = ft.SnackBar(ft.Text(f"Ошибка обновления: {e}", color=ft.colors.RED))
                     page.overlay.append(error_snackbar)
                     error_snackbar.open = True
@@ -495,7 +541,7 @@ def main(page: ft.Page):
                         [
                             ft.Text("Монета", size=18, weight="bold", expand=1, text_align="start"),
                             ft.Text("Биржа", size=18, weight="bold", expand=1, text_align="start"),
-                            ft.Text("Цена (₽)", size=18, weight="bold", expand=1, text_align="start"),
+                            ft.Text("Цена ($)", size=18, weight="bold", expand=1, text_align="start"),
                         ],
                         alignment="spaceBetween",
                         height=50,
@@ -514,7 +560,7 @@ def main(page: ft.Page):
                             [
                                 ft.Text(coin_name, expand=1, text_align="start"),
                                 ft.Text(exchange, expand=1, text_align="start"),
-                                ft.Text(f"{price} ₽", expand=1, text_align="start"),
+                                ft.Text(f"{price} $", expand=1, text_align="start"),
                             ],
                             alignment="spaceBetween",
                             height=50,
@@ -524,8 +570,21 @@ def main(page: ft.Page):
             # Кнопка для обновления данных
             refresh_button = ft.ElevatedButton(
                 text="Обновить данные",
-                on_click=lambda e: refresh_summary(),
+                on_click=refresh_summary,
                 bgcolor=ft.colors.GREEN_500,
+                color=ft.colors.WHITE,
+            )
+
+            # Кнопка возврата в профиль
+            def return_to_profile(e):
+                # Возврат к профилю
+                page.views.pop()
+                show_profile(page, name)
+
+            back_button = ft.ElevatedButton(
+                text="Вернуться в профиль",
+                on_click=return_to_profile,
+                bgcolor=ft.colors.BLUE_500,
                 color=ft.colors.WHITE,
             )
 
@@ -535,9 +594,10 @@ def main(page: ft.Page):
                     ft.Text("Свод по монетам", size=24, weight="bold", text_align="center"),
                     ft.Divider(thickness=2, opacity=0.3),
                     summary_table,
-                    refresh_button,
+                    ft.Row([refresh_button, back_button], alignment="spaceAround")
                 ]
             )
+        
 
         def open_summary_page(e):
             """Открывает страницу со сводом."""
@@ -545,6 +605,102 @@ def main(page: ft.Page):
             page.views.append(summary_page)
             page.go("/summary")
 
+        def generate_price_chart(prices, future_price, asset_id):
+                """
+                Рисует линию: исторические цены + точка прогноза.
+                Сохраняет в файл chart_<asset_id>.png и возвращает путь.
+                Цвета настроены под тёмную тему вашего приложения.
+                """
+                # объединяем историю + прогноз
+                x = list(range(len(prices))) + [len(prices)]
+                y = prices + [future_price]
+
+                # создаём figure с тёмным фоном
+                fig = plt.figure(figsize=(5, 3), dpi=100, facecolor="#121212")
+                ax = fig.add_subplot(1, 1, 1, facecolor="#121212")
+
+                # рисуем линию (синяя) и маркеры (оранжевые)
+                ax.plot(
+                    x, y,
+                    color="#1976D2",            # синий (Flet.blue_700)
+                    marker="o",
+                    markerfacecolor="#FFB300",  # янтарный (Flet.amber_600)
+                    markeredgecolor="#FFB300",
+                    linewidth=2,
+                )
+
+                # заголовок и подписи белым
+                ax.set_title("История цены и прогноз", color="white", fontsize=12, pad=10)
+                ax.set_xlabel("Шаги времени", color="white", fontsize=10)
+                ax.set_ylabel("Цена ($)", color="white", fontsize=10)
+
+                # цвет спайн и тиков
+                for spine in ax.spines.values():
+                    spine.set_color("#424242")  # тёмно-серый (Flet.grey_700)
+                ax.tick_params(colors="white")
+
+                # сетка
+                ax.grid(color="#424242", linestyle="--", alpha=0.5)
+
+                plt.tight_layout()
+
+                # сохраняем в PNG
+                filename = f"chart_{asset_id}.png"
+                plt.savefig(filename, facecolor=fig.get_facecolor(), edgecolor="none")
+                plt.close(fig)
+                return filename
+
+
+        def show_analysis_dialog(asset):
+            # 1. Приготовление данных
+            last_prices = fetch_last_20_prices(asset.coin_name)
+            if not last_prices:
+                dlg = ft.AlertDialog(
+                    title=ft.Text("Ошибка", weight="bold"),
+                    content=ft.Text("Нет данных для анализа."),
+                    actions=[ft.TextButton("Закрыть", on_click=lambda e: close_dialog(dlg))],
+                    modal=True
+                )
+                page.dialog = dlg; dlg.open = True; page.update()
+                return
+
+            future_price = predict_future_price(last_prices)
+            current_price = last_prices[-1]
+            diff = round(future_price - current_price, 2)
+            profit = round((future_price * asset.quantity) - (current_price * asset.quantity), 2)
+            color = ft.colors.GREEN_500 if profit >= 0 else ft.colors.RED_400
+
+            # 2. Генерируем график и получаем путь к файлу
+            chart_file = generate_price_chart(last_prices, future_price, asset.id)
+
+            # 3. Обработчик закрытия
+            def close_dialog(e):
+                dlg.open = False
+                page.update()
+
+            # 4. Строим диалог с Image
+            dlg = ft.AlertDialog(
+                modal=True,
+                title=ft.Text(f"🔍 Аналитика по {asset.coin_name}", size=20, weight="bold"),
+                content=ft.Column(
+                    [
+                        # сам график
+                        Image(src=chart_file, width=480, height=300),
+                        # текстовая сtатистика
+                        ft.Text(f"Текущая цена: {current_price} $", size=16),
+                        ft.Text(f"Прогноз: {round(future_price,2)} $", size=16),
+                        ft.Text(f"Δ {diff} $", size=16, color=color),
+                        ft.Text(f"{'Профит' if profit>=0 else 'Убыток'}: {profit} $", size=16, color=color),
+                    ],
+                    spacing=12,
+                ),
+                actions=[ft.TextButton("Закрыть", on_click=close_dialog)],
+                actions_alignment="end",
+            )
+
+            page.dialog = dlg
+            dlg.open = True
+            page.update()
 
         page.controls.clear()
 
@@ -569,7 +725,7 @@ def main(page: ft.Page):
                 ft.Column(
                     [
                         ft.Text(f"{user.name}", size=24, weight="bold", color=ft.colors.WHITE),
-                        ft.Text(f"Баланс: {user.balance} ₽", size=20, color=ft.colors.GREEN_500),
+                        ft.Text(f"Баланс: {round(user.balance, 1)} $", size=20, color=ft.colors.GREEN_500),
                     ],
                     alignment="start",
                 ),
@@ -616,7 +772,7 @@ def main(page: ft.Page):
                     [
                         ft.Text("Монета", size=18, weight="bold", expand=1, text_align="left"),
                         ft.Text("Количество", size=18, weight="bold", expand=1, text_align="left"),
-                        ft.Text("Стоимость (₽)", size=18, weight="bold", expand=1, text_align="left"),
+                        ft.Text("Стоимость ($)", size=18, weight="bold", expand=1, text_align="left"),
                         ft.Text("Действие", size=18, weight="bold", expand=1, text_align="center"),
                     ],
                     alignment="spaceBetween",
@@ -634,7 +790,7 @@ def main(page: ft.Page):
                 [
                     ft.Text(asset.coin_name, size=16, expand=1, text_align="start"),  # Первая колонка
                     ft.Text(str(asset.quantity), size=16, expand=1, text_align="start"),  # Вторая колонка
-                    ft.Text(f"{asset.value_rub} ₽", size=16, expand=1, text_align="start"),  # Третья колонка
+                    ft.Text(f"{asset.value_rub} $", size=16, expand=1, text_align="start"),  # Третья колонка
                     ft.Row(
                         [
                             ft.ElevatedButton(
@@ -648,6 +804,12 @@ def main(page: ft.Page):
                                 on_click=lambda e, a_id=asset.id: delete_asset(a_id),
                                 bgcolor=ft.colors.RED_500,
                                 color=ft.colors.BLACK,
+                            ),
+                            ft.ElevatedButton(
+                                text="Анализ",
+                                on_click=lambda e, a=asset: show_analysis_dialog(a),
+                                bgcolor=ft.colors.BLUE_700,
+                                color=ft.colors.WHITE,
                             ),
                         ],
                         alignment="center",
@@ -708,6 +870,8 @@ def main(page: ft.Page):
     def login_user():
         try:
             username = login_username_field.value
+            global user_name
+            user_name = str(username)
             password = login_password_field.value
 
             if not username or not password:
@@ -735,6 +899,7 @@ def main(page: ft.Page):
     # Логика регистрации
     def register_user():
         username = register_username_field.value
+        user_name = username
         password = register_password_field.value
 
         if not username or not password:
