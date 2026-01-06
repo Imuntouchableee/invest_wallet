@@ -57,11 +57,7 @@ exchanges = {
 
 # Топ-25 монет
 top_25_expensive_coins = [
-    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'TON/USDT',
-    'LTC/USDT', 'BCH/USDT', 'DOT/USDT', 'LINK/USDT', 'AAVE/USDT',
-    'ATOM/USDT', 'FIL/USDT', 'NEAR/USDT', 'SOL/USDT', 'AVAX/USDT',
-    'ALGO/USDT', 'MANA/USDT', 'SAND/USDT',
-    'XTZ/USDT', 'ICP/USDT', 'GRT/USDT', 'EGLD/USDT'
+    'BTC/USDT', 'ETH/USDT', 'BNB/USDT'
 ]
 
 # Загрузка рынков для каждой биржи
