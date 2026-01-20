@@ -3,7 +3,7 @@
 """
 
 from datetime import datetime, timedelta
-from models import session, PortfolioHistory, User, Asset
+from backend.models import session, PortfolioHistory, User, Asset
 import random
 
 def clear_and_fill_portfolio_history(user_id=1):

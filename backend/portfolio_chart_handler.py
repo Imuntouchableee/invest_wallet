@@ -8,7 +8,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
-from models import session, PortfolioHistory
+from backend.models import session, PortfolioHistory
 import io
 
 
