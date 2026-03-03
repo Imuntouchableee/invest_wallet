@@ -1,7 +1,8 @@
 """Работа с базой данных PostgreSQL"""
 import psycopg2
 from psycopg2.extras import execute_values
-from config import DATABASE
+# импортируем конфиг из пакета data
+from data.config import DATABASE
 
 
 class DatabaseManager:

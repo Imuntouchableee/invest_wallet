@@ -3,39 +3,6 @@
 Профессиональный дизайн торгового интерфейса
 """
 import flet as ft
-import logging
-from datetime import datetime
-
-from ui.config import (
-    DARK_BG, CARD_BG, PRIMARY_COLOR, SECONDARY_COLOR, ACCENT_COLOR,
-    TEXT_PRIMARY, TEXT_SECONDARY, BORDER_COLOR, SUCCESS_COLOR, WARNING_COLOR,
-    EXCHANGE_COLORS, EXCHANGE_NAMES,
-)
-
-# Настройка логирования для торгового терминала
-logger = logging.getLogger(__name__)
-
-
-def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
-                        asset=None, exchange_name=None, side=None):
-    """
-    Профессиональный торговый терминал
-    
-    Args:
-        page: Страница Flet
-        current_user: Текущий пользователь
-        user_keys: Список API ключей бирж
-        asset: Выбранный актив (опционально)
-        exchange_name: Название биржи (опционально)
-        side: Направление сделки 'buy' или 'sell' (опционально)
-    """
-    
-    # Логируем открытие терминала
-    logger.info(f"[TRADING] Открытие торгового терминала")
-    logger.info(f"[TRADING] Пользователь: {current_user.get('user').name if current_user.get('user') else 'Unknown'}")
-    logger.info(f"[TRADING] Актив: {asset['currency'] if asset else 'не выбран'}, Биржа: {exchange_name or 'не указана'}, Направление: {side or 'buy'}")
-    logger.info(f"[TRADING] Доступно бирж: {len(user_keys) if user_keys else 0}")
-    
     # Проверка наличия API ключей
     if not user_keys:
         logger.warning("[TRADING] Нет подключенных бирж!")
@@ -57,8 +24,50 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     
     logger.info(f"[TRADING] Инициализация: пара={initial_symbol}, биржа={initial_exchange}, сторона={initial_side}")
     
+    # подключение к локальной БД, где хранятся пары и балансы
+    db = DatabaseManager()
+    if not db.connect():
+        # показать статус позже, когда определим функцию show_status
+        logger.error("[TRADING] Не удалось подключиться к локальной БД")
+    
+    # функции доступа к локальным таблицам
+    def query_pair_info(exchange, symbol):
+        try:
+            db.cursor.execute(
+                f"SELECT current_price, change_24h_percent, change_24h_absolute, high_24h, low_24h, volume_24h, maker_fee, taker_fee, min_order_amount, lot_size"
+                f" FROM {exchange}_pairs WHERE symbol=%s",
+                (symbol,)
+            )
+            row = db.cursor.fetchone()
+            if row:
+                keys = [
+                    'current_price','change_24h_percent','change_24h_absolute',
+                    'high_24h','low_24h','volume_24h', 'maker_fee', 'taker_fee', 'min_order_amount', 'lot_size'
+                ]
+                return dict(zip(keys, row))
+        except Exception as e:
+            logger.error(f"[TRADING] Ошибка запроса пары из БД: {e}")
+        return {}
+    
+    def query_balance(exchange, asset):
+        try:
+            db.cursor.execute(
+                f"SELECT free, locked, total FROM {exchange}_balance WHERE asset=%s",
+                (asset,)
+            )
+            row = db.cursor.fetchone()
+            if row:
+                return {'free': row[0], 'locked': row[1], 'total': row[2]}
+        except Exception as e:
+            logger.error(f"[TRADING] Ошибка запроса баланса из БД: {e}")
+        return {}
+    
     def close_dialog():
         logger.info("[TRADING] Закрытие торгового терминала")
+        try:
+            db.close()
+        except:
+            pass
         dialog.open = False
         page.update()
     
@@ -102,6 +111,8 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     buy_active = initial_side == "buy"
     sell_active = initial_side == "sell"
     action_color = BUY_COLOR if buy_active else SELL_COLOR
+    # текущий тип ордера: 'market', 'limit', 'stop-limit'
+    order_type = 'market'
     
     # ==================== ЗАГОЛОВОК ====================
     header = ft.Container(
@@ -141,59 +152,134 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     )
     
     # ==================== ВЫБОР БИРЖИ И ПАРЫ ====================
-    # Название биржи для отображения
-    exchange_display_name = {
-        "bybit": "Bybit",
-        "gateio": "Gate.io", 
-        "mexc": "MEXC"
-    }.get(initial_exchange, initial_exchange.upper())
-    
-    # Название монеты
-    coin_name = asset['currency'] if asset else "BTC"
-    
+    # текущее состояние
+    current_exchange = initial_exchange
+    current_symbol = initial_symbol
+    side_selector_value = initial_side
+    # имя монеты из символа
+    coin_name = current_symbol.split("/")[0] if "/" in current_symbol else current_symbol
+
+    # динамический текст для отображения доступных средств
+    available_text = ft.Text("", size=12, color=PRIMARY_COLOR, weight="bold")
+
+    # утилиты для обновления UI
+    def load_symbols(exchange):
+        symbols = []
+        try:
+            db.cursor.execute(f"SELECT symbol FROM {exchange}_pairs ORDER BY symbol LIMIT 100")
+            symbols = [r[0] for r in db.cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"[TRADING] Не удалось загрузить символы из БД: {e}")
+        symbol_dropdown.options = [ft.dropdown.Option(s) for s in symbols]
+        if symbols:
+            symbol_dropdown.value = symbols[0]
+            on_symbol_changed(symbols[0])
+
+    def on_exchange_changed(e):
+        nonlocal current_exchange
+        current_exchange = e.control.value
+        # обновляем отображение названия
+        exchange_display = {
+            "bybit": "Bybit",
+            "gateio": "Gate.io",
+            "mexc": "MEXC"
+        }.get(current_exchange, current_exchange.upper())
+        load_symbols(current_exchange)
+        update_available()
+        page.update()
+
+    def on_symbol_changed(value):
+        nonlocal current_symbol, coin_name
+        current_symbol = value
+        coin_name = current_symbol.split("/")[0]
+        # обновляем суффикс поля количества
+        quantity_field.suffix_text = coin_name if side_selector_value == 'sell' else 'USDT'
+        # данные из базы
+        info = query_pair_info(current_exchange, current_symbol)
+        if info:
+            price_value.value = f"${info.get('current_price', 0):,.2f}"
+            change_label.value = f"{info.get('change_24h_percent', 0):+.2f}%"
+            high_label.value = f"${info.get('high_24h', 0):,.2f}"
+            low_label.value = f"${info.get('low_24h', 0):,.2f}"
+            volume_label.value = f"${info.get('volume_24h', 0):,.0f}"
+            maker_fee_label.value = f"{info.get('maker_fee', 0):.6f}%"
+            taker_fee_label.value = f"{info.get('taker_fee', 0):.6f}%"
+            min_order_label.value = f"{info.get('min_order_amount', 0)}"
+            lot_size_label.value = f"{info.get('lot_size', 0)}"
+        else:
+            # если в БД нет данных, можно запросить цену по API как запасной вариант
+            success, curr = get_current_price(current_exchange, current_symbol, "", "")
+            if success:
+                price_value.value = f"${curr.get('last',0):,.2f}"
+                change_label.value = ""
+                high_label.value = f"${curr.get('high',0):,.2f}"
+                low_label.value = f"${curr.get('low',0):,.2f}"
+                volume_label.value = ""
+            maker_fee_label.value = "?"
+            taker_fee_label.value = "?"
+            min_order_label.value = "?"
+            lot_size_label.value = "?"
+        update_action_button()
+        update_available()
+        page.update()
+
+    def update_available():
+        if side_selector_value == 'sell':
+            bal = query_balance(current_exchange, coin_name)
+            label_asset = coin_name
+        else:
+            bal = query_balance(current_exchange, 'USDT')
+            label_asset = 'USDT'
+        # balance query may return None values for fields, ensure we format safely
+        avail = 0
+        if bal:
+            # bal.get could return None if the DB row has NULL
+            avail = bal.get('free')
+            if avail is None:
+                avail = 0
+        available_text.value = f"{avail:.6f} {label_asset}"
+        page.update()
+
+    # dropdownы
+    exchange_dropdown = ft.Dropdown(
+        width=180,
+        options=[
+            ft.dropdown.Option(k.exchange_name,
+                               text=EXCHANGE_NAMES.get(k.exchange_name, k.exchange_name.upper()))
+            for k in user_keys
+        ],
+        value=initial_exchange,
+        on_change=on_exchange_changed,
+    )
+    symbol_dropdown = ft.Dropdown(
+        width=180,
+        options=[],
+        value=initial_symbol,
+        on_change=lambda e: on_symbol_changed(e.control.value),
+    )
+
+    # начальную загрузку символов выполним ниже, после создания полей ввода
+
+    # строка выбора и отображения
     exchange_selector = ft.Container(
         content=ft.Row([
-            # Биржа (только отображение)
             ft.Column([
                 ft.Text("БИРЖА", size=10, color=TEXT_SECONDARY, weight="bold"),
                 ft.Container(height=5),
-                ft.Container(
-                    content=ft.Row([
-                        ft.Icon(ft.icons.ACCOUNT_BALANCE, size=18, color=PRIMARY_COLOR),
-                        ft.Container(width=8),
-                        ft.Text(exchange_display_name, size=14, weight="bold", color=TEXT_PRIMARY),
-                    ]),
-                    width=180,
-                    height=45,
-                    bgcolor=INPUT_BG,
-                    border_radius=8,
-                    border=ft.border.all(1, BORDER_COLOR),
-                    padding=ft.padding.symmetric(horizontal=15),
-                    alignment=ft.alignment.center_left,
-                ),
+                exchange_dropdown,
             ], spacing=0),
             ft.Container(width=15),
-            # Торговая пара (только отображение)
             ft.Column([
                 ft.Text("ТОРГОВАЯ ПАРА", size=10, color=TEXT_SECONDARY, weight="bold"),
                 ft.Container(height=5),
-                ft.Container(
-                    content=ft.Row([
-                        ft.Icon(ft.icons.CURRENCY_BITCOIN, size=18, color=WARNING_COLOR),
-                        ft.Container(width=8),
-                        ft.Text(f"{coin_name} / USDT", size=14, weight="bold", color=TEXT_PRIMARY),
-                    ]),
-                    width=180,
-                    height=45,
-                    bgcolor=INPUT_BG,
-                    border_radius=8,
-                    border=ft.border.all(1, BORDER_COLOR),
-                    padding=ft.padding.symmetric(horizontal=15),
-                    alignment=ft.alignment.center_left,
-                ),
+                symbol_dropdown,
             ], spacing=0),
             ft.Container(width=15),
-            # Подсказка о подключении
+            ft.Column([
+                ft.Text("Доступно:", size=12, color=TEXT_SECONDARY),
+                available_text,
+            ], spacing=0),
+            ft.Container(width=15),
             ft.Container(
                 content=ft.Row([
                     ft.Icon(ft.icons.CHECK_CIRCLE, size=16, color=SUCCESS_COLOR),
@@ -211,58 +297,89 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     )
     
     # ==================== ИНФОРМАЦИЯ О ЦЕНЕ ====================
+    # динамические поля для отображения из БД или API
+    price_value = ft.Text("$0.00", size=42, weight="bold", color=SUCCESS_COLOR)
+    change_label = ft.Text("0.00%", size=16, color=SUCCESS_COLOR, weight="bold")
+    high_label = ft.Text("$0.00", size=18, weight="bold", color=TEXT_PRIMARY)
+    low_label = ft.Text("$0.00", size=18, weight="bold", color=TEXT_PRIMARY)
+    volume_label = ft.Text("$0", size=18, weight="bold", color=PRIMARY_COLOR)
+    maker_fee_label = ft.Text("0.00%", size=12, color=TEXT_SECONDARY)
+    taker_fee_label = ft.Text("0.00%", size=12, color=TEXT_SECONDARY)
+    min_order_label = ft.Text("0", size=12, color=TEXT_SECONDARY)
+    lot_size_label = ft.Text("0", size=12, color=TEXT_SECONDARY)
+
     price_info = ft.Container(
-        content=ft.Row([
-            # Текущая цена (левая часть)
-            ft.Container(
-                content=ft.Column([
-                    ft.Text("ТЕКУЩАЯ ЦЕНА", size=11, color=TEXT_SECONDARY, weight="bold"),
-                    ft.Container(height=10),
-                    ft.Row([
-                        ft.Text("$", size=28, color=SUCCESS_COLOR, weight="bold"),
-                        ft.Text("104,250.00", size=42, weight="bold", color=SUCCESS_COLOR),
-                    ], spacing=3, vertical_alignment="end"),
-                    ft.Container(height=8),
-                    ft.Row([
-                        ft.Icon(ft.icons.TRENDING_UP, size=22, color=SUCCESS_COLOR),
-                        ft.Text("+2.45%", size=16, color=SUCCESS_COLOR, weight="bold"),
-                        ft.Text("за 24ч", size=13, color=TEXT_SECONDARY),
-                    ], spacing=8),
-                ], spacing=0),
-                expand=2,
-            ),
-            
-            # Разделитель
-            ft.Container(
-                content=ft.VerticalDivider(width=1, color=BORDER_COLOR),
-                height=100,
-                padding=ft.padding.symmetric(horizontal=20),
-            ),
-            
-            # Статистика (правая часть)
-            ft.Container(
-                content=ft.Row([
-                    ft.Column([
-                        ft.Text("24ч МАКС", size=11, color=TEXT_SECONDARY, weight="bold"),
-                        ft.Container(height=5),
-                        ft.Text("$105,800", size=18, weight="bold", color=TEXT_PRIMARY),
-                    ], spacing=0, horizontal_alignment="center"),
-                    ft.Container(width=30),
-                    ft.Column([
-                        ft.Text("24ч МИН", size=11, color=TEXT_SECONDARY, weight="bold"),
-                        ft.Container(height=5),
-                        ft.Text("$101,200", size=18, weight="bold", color=TEXT_PRIMARY),
-                    ], spacing=0, horizontal_alignment="center"),
-                    ft.Container(width=30),
-                    ft.Column([
-                        ft.Text("ОБЪЁМ", size=11, color=TEXT_SECONDARY, weight="bold"),
-                        ft.Container(height=5),
-                        ft.Text("$2.4B", size=18, weight="bold", color=PRIMARY_COLOR),
-                    ], spacing=0, horizontal_alignment="center"),
-                ], alignment="center"),
-                expand=3,
-            ),
-        ], vertical_alignment="center"),
+        content=ft.Column([
+            ft.Row([
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("ТЕКУЩАЯ ЦЕНА", size=11, color=TEXT_SECONDARY, weight="bold"),
+                        ft.Container(height=10),
+                        ft.Row([
+                            ft.Text("$", size=28, color=SUCCESS_COLOR, weight="bold"),
+                            price_value,
+                        ], spacing=3, vertical_alignment="end"),
+                        ft.Container(height=8),
+                        ft.Row([
+                            ft.Icon(ft.icons.TRENDING_UP, size=22, color=SUCCESS_COLOR),
+                            change_label,
+                            ft.Text("за 24ч", size=13, color=TEXT_SECONDARY),
+                        ], spacing=8),
+                    ], spacing=0),
+                    expand=2,
+                ),
+                ft.Container(
+                    content=ft.VerticalDivider(width=1, color=BORDER_COLOR),
+                    height=100,
+                    padding=ft.padding.symmetric(horizontal=20),
+                ),
+                ft.Container(
+                    content=ft.Row([
+                        ft.Column([
+                            ft.Text("24ч МАКС", size=11, color=TEXT_SECONDARY, weight="bold"),
+                            ft.Container(height=5),
+                            high_label,
+                        ], spacing=0, horizontal_alignment="center"),
+                        ft.Container(width=30),
+                        ft.Column([
+                            ft.Text("24ч МИН", size=11, color=TEXT_SECONDARY, weight="bold"),
+                            ft.Container(height=5),
+                            low_label,
+                        ], spacing=0, horizontal_alignment="center"),
+                        ft.Container(width=30),
+                        ft.Column([
+                            ft.Text("ОБЪЁМ", size=11, color=TEXT_SECONDARY, weight="bold"),
+                            ft.Container(height=5),
+                            volume_label,
+                        ], spacing=0, horizontal_alignment="center"),
+                    ], alignment="center"),
+                    expand=3,
+                ),
+            ], vertical_alignment="center"),
+            # дополнительная техническая информация
+            ft.Container(height=15),
+            ft.Row([
+                ft.Column([
+                    ft.Text("Maker", size=11, color=TEXT_SECONDARY, weight="bold"),
+                    maker_fee_label,
+                ], spacing=0, horizontal_alignment="center"),
+                ft.Container(width=20),
+                ft.Column([
+                    ft.Text("Taker", size=11, color=TEXT_SECONDARY, weight="bold"),
+                    taker_fee_label,
+                ], spacing=0, horizontal_alignment="center"),
+                ft.Container(width=20),
+                ft.Column([
+                    ft.Text("Мин. ордер", size=11, color=TEXT_SECONDARY, weight="bold"),
+                    min_order_label,
+                ], spacing=0, horizontal_alignment="center"),
+                ft.Container(width=20),
+                ft.Column([
+                    ft.Text("Лот", size=11, color=TEXT_SECONDARY, weight="bold"),
+                    lot_size_label,
+                ], spacing=0, horizontal_alignment="center"),
+            ], alignment="center"),
+        ]),
         padding=25,
         bgcolor=ft.colors.with_opacity(0.05, SUCCESS_COLOR),
         border_radius=12,
@@ -270,40 +387,79 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     )
     
     # ==================== ПЕРЕКЛЮЧАТЕЛЬ КУПИТЬ/ПРОДАТЬ ====================
-    side_selector = ft.Container(
+    def set_side(new_side):
+        nonlocal buy_active, sell_active, side_selector_value, action_color
+        buy_active = new_side == 'buy'
+        sell_active = new_side == 'sell'
+        side_selector_value = new_side
+        action_color = BUY_COLOR if buy_active else SELL_COLOR
+        # обновляем стиль кнопок
+        buy_btn.bgcolor = BUY_COLOR if buy_active else ft.colors.with_opacity(0.1, BUY_COLOR)
+        # icon is first control, text is third
+        buy_btn.content.controls[0].color = DARK_BG if buy_active else BUY_COLOR
+        buy_btn.content.controls[2].color = DARK_BG if buy_active else BUY_COLOR
+        sell_btn.bgcolor = SELL_COLOR if sell_active else ft.colors.with_opacity(0.1, SELL_COLOR)
+        sell_btn.content.controls[0].color = DARK_BG if sell_active else SELL_COLOR
+        sell_btn.content.controls[2].color = DARK_BG if sell_active else SELL_COLOR
+        # обновляем суффикс поля количества
+        try:
+            quantity_field.suffix_text = coin_name if sell_active else 'USDT'
+        except NameError:
+            # quantity_field may not be initialized yet during startup
+            pass
+        # these helper functions might not be defined yet when set_side is
+        # invoked during the initial dialog setup, so guard against NameError.
+        try:
+            update_available()
+        except NameError:
+            pass
+        try:
+            update_summary()
+        except NameError:
+            pass
+        try:
+            update_action_button()
+        except NameError:
+            pass
+        page.update()
+
+    # кнопки, которые будут изменяться
+    buy_btn = ft.Container(
         content=ft.Row([
-            # Кнопка КУПИТЬ
-            ft.Container(
-                content=ft.Row([
-                    ft.Icon(ft.icons.ARROW_DOWNWARD_ROUNDED, size=26, color=DARK_BG if buy_active else BUY_COLOR),
-                    ft.Container(width=10),
-                    ft.Text("КУПИТЬ", size=18, weight="bold", color=DARK_BG if buy_active else BUY_COLOR),
-                ], alignment="center"),
-                expand=True,
-                height=60,
-                bgcolor=BUY_COLOR if buy_active else ft.colors.with_opacity(0.1, BUY_COLOR),
-                border_radius=ft.border_radius.only(top_left=12, bottom_left=12),
-                border=ft.border.all(2, BUY_COLOR),
-                alignment=ft.alignment.center,
-                ink=True,
-            ),
-            # Кнопка ПРОДАТЬ
-            ft.Container(
-                content=ft.Row([
-                    ft.Icon(ft.icons.ARROW_UPWARD_ROUNDED, size=26, color=DARK_BG if sell_active else SELL_COLOR),
-                    ft.Container(width=10),
-                    ft.Text("ПРОДАТЬ", size=18, weight="bold", color=DARK_BG if sell_active else SELL_COLOR),
-                ], alignment="center"),
-                expand=True,
-                height=60,
-                bgcolor=SELL_COLOR if sell_active else ft.colors.with_opacity(0.1, SELL_COLOR),
-                border_radius=ft.border_radius.only(top_right=12, bottom_right=12),
-                border=ft.border.all(2, SELL_COLOR),
-                alignment=ft.alignment.center,
-                ink=True,
-            ),
-        ], spacing=0),
+            ft.Icon(ft.icons.ARROW_DOWNWARD_ROUNDED, size=26, color=DARK_BG if buy_active else BUY_COLOR),
+            ft.Container(width=10),
+            ft.Text("КУПИТЬ", size=18, weight="bold", color=DARK_BG if buy_active else BUY_COLOR),
+        ], alignment="center"),
+        expand=True,
+        height=60,
+        bgcolor=BUY_COLOR if buy_active else ft.colors.with_opacity(0.1, BUY_COLOR),
+        border_radius=ft.border_radius.only(top_left=12, bottom_left=12),
+        border=ft.border.all(2, BUY_COLOR),
+        alignment=ft.alignment.center,
+        ink=True,
+        on_click=lambda e: set_side('buy'),
     )
+    sell_btn = ft.Container(
+        content=ft.Row([
+            ft.Icon(ft.icons.ARROW_UPWARD_ROUNDED, size=26, color=DARK_BG if sell_active else SELL_COLOR),
+            ft.Container(width=10),
+            ft.Text("ПРОДАТЬ", size=18, weight="bold", color=DARK_BG if sell_active else SELL_COLOR),
+        ], alignment="center"),
+        expand=True,
+        height=60,
+        bgcolor=SELL_COLOR if sell_active else ft.colors.with_opacity(0.1, SELL_COLOR),
+        border_radius=ft.border_radius.only(top_right=12, bottom_right=12),
+        border=ft.border.all(2, SELL_COLOR),
+        alignment=ft.alignment.center,
+        ink=True,
+        on_click=lambda e: set_side('sell'),
+    )
+    side_selector = ft.Container(
+        content=ft.Row([buy_btn, sell_btn], spacing=0),
+    )
+    # начальную сторону будем назначать позже, после создания всех элементов
+    # (особенно update_summary, иначе возможны ошибки при первом вызове)
+    # set_side(initial_side)  # moved further down
     
     # ==================== ТИП ОРДЕРА ====================
     order_type_selector = ft.Container(
@@ -321,11 +477,13 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
                     ], horizontal_alignment="center", spacing=2),
                     expand=True,
                     padding=20,
+                    # will be updated by set_order_type
                     bgcolor=ft.colors.with_opacity(0.1, PRIMARY_COLOR),
                     border_radius=12,
-                    border=ft.border.all(2, PRIMARY_COLOR),
+                    border=ft.border.all(1, BORDER_COLOR),
                     alignment=ft.alignment.center,
                     ink=True,
+                    on_click=lambda e: set_order_type('market'),
                 ),
                 ft.Container(width=15),
                 # Лимитный
@@ -343,6 +501,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
                     border=ft.border.all(1, BORDER_COLOR),
                     alignment=ft.alignment.center,
                     ink=True,
+                    on_click=lambda e: set_order_type('limit'),
                 ),
                 ft.Container(width=15),
                 # Стоп-лимит
@@ -360,6 +519,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
                     border=ft.border.all(1, BORDER_COLOR),
                     alignment=ft.alignment.center,
                     ink=True,
+                    on_click=lambda e: set_order_type('stop-limit'),
                 ),
             ]),
         ]),
@@ -370,6 +530,56 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     )
     
     # ==================== ФОРМА ВВОДА ====================
+    # поле ввода количества, сохраняем для последующего чтения
+    def quantity_changed(e):
+        clear_percent_highlight()
+        update_summary()
+
+    quantity_field = ft.TextField(
+        value="0.001",
+        expand=True,
+        height=60,
+        bgcolor=INPUT_BG,
+        border_color=BORDER_COLOR,
+        focused_border_color=PRIMARY_COLOR,
+        text_size=20,
+        text_align="right",
+        suffix_text=coin_name,
+        content_padding=ft.padding.symmetric(horizontal=20, vertical=15),
+        on_change=quantity_changed,
+    )
+
+    # поля цены для лимитных ордеров
+    price_field = ft.TextField(
+        value="",
+        hint_text="Цена",
+        expand=True,
+        height=50,
+        visible=False,
+        bgcolor=INPUT_BG,
+        border_color=BORDER_COLOR,
+        focused_border_color=PRIMARY_COLOR,
+        text_size=16,
+        text_align="right",
+        content_padding=ft.padding.symmetric(horizontal=12, vertical=12),
+        on_change=lambda e: update_summary(),
+    )
+
+    stop_price_field = ft.TextField(
+        value="",
+        hint_text="Стоп-цена",
+        expand=True,
+        height=50,
+        visible=False,
+        bgcolor=INPUT_BG,
+        border_color=BORDER_COLOR,
+        focused_border_color=PRIMARY_COLOR,
+        text_size=16,
+        text_align="right",
+        content_padding=ft.padding.symmetric(horizontal=12, vertical=12),
+        on_change=lambda e: update_summary(),
+    )
+
     input_form = ft.Container(
         content=ft.Column([
             # Количество
@@ -377,70 +587,190 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
                 ft.Text("КОЛИЧЕСТВО", size=11, color=TEXT_SECONDARY, weight="bold"),
                 ft.Container(expand=True),
                 ft.Text("Доступно: ", size=12, color=TEXT_SECONDARY),
-                ft.Text("0.5823 BTC", size=12, color=PRIMARY_COLOR, weight="bold"),
+                available_text,
             ]),
-            ft.Container(height=12),
+            # кнопки выбора типа ордера — вынесены в переменные для подсветки
             ft.Row([
-                ft.TextField(
-                    value="0.001",
+                (market_btn := ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.icons.FLASH_ON_ROUNDED, size=32, color=PRIMARY_COLOR),
+                        ft.Container(height=8),
+                        ft.Text("Рыночный", size=15, weight="bold", color=TEXT_PRIMARY),
+                        ft.Text("Моментальное исполнение", size=11, color=TEXT_SECONDARY),
+                    ], horizontal_alignment="center", spacing=2),
                     expand=True,
-                    height=60,
-                    bgcolor=INPUT_BG,
-                    border_color=BORDER_COLOR,
-                    focused_border_color=PRIMARY_COLOR,
-                    text_size=20,
-                    text_align="right",
-                    suffix_text="BTC",
-                    content_padding=ft.padding.symmetric(horizontal=20, vertical=15),
-                ),
-                ft.Container(width=20),
-                # Быстрый выбор процента
-                ft.Row([
-                    ft.Container(
-                        content=ft.Text("25%", size=13, color=TEXT_SECONDARY, weight="bold"),
-                        padding=ft.padding.symmetric(horizontal=16, vertical=12),
-                        bgcolor=INPUT_BG,
-                        border_radius=8,
-                        border=ft.border.all(1, BORDER_COLOR),
-                        ink=True,
-                    ),
-                    ft.Container(
-                        content=ft.Text("50%", size=13, color=TEXT_SECONDARY, weight="bold"),
-                        padding=ft.padding.symmetric(horizontal=16, vertical=12),
-                        bgcolor=INPUT_BG,
-                        border_radius=8,
-                        border=ft.border.all(1, BORDER_COLOR),
-                        ink=True,
-                    ),
-                    ft.Container(
-                        content=ft.Text("75%", size=13, color=TEXT_SECONDARY, weight="bold"),
-                        padding=ft.padding.symmetric(horizontal=16, vertical=12),
-                        bgcolor=INPUT_BG,
-                        border_radius=8,
-                        border=ft.border.all(1, BORDER_COLOR),
-                        ink=True,
-                    ),
-                    ft.Container(
-                        content=ft.Text("MAX", size=13, color=PRIMARY_COLOR, weight="bold"),
-                        padding=ft.padding.symmetric(horizontal=16, vertical=12),
-                        bgcolor=ft.colors.with_opacity(0.15, PRIMARY_COLOR),
-                        border_radius=8,
-                        border=ft.border.all(1, PRIMARY_COLOR),
-                        ink=True,
-                    ),
-                ], spacing=10),
+                    padding=20,
+                    bgcolor=ft.colors.with_opacity(0.1, PRIMARY_COLOR),
+                    border_radius=12,
+                    border=ft.border.all(1, BORDER_COLOR),
+                    alignment=ft.alignment.center,
+                    ink=True,
+                    on_click=lambda e: set_order_type('market'),
+                )),
+                ft.Container(width=15),
+                (limit_btn := ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.icons.SCHEDULE_ROUNDED, size=32, color=TEXT_SECONDARY),
+                        ft.Container(height=8),
+                        ft.Text("Лимитный", size=15, weight="bold", color=TEXT_PRIMARY),
+                        ft.Text("По указанной цене", size=11, color=TEXT_SECONDARY),
+                    ], horizontal_alignment="center", spacing=2),
+                    expand=True,
+                    padding=20,
+                    bgcolor=ft.colors.with_opacity(0.03, TEXT_SECONDARY),
+                    border_radius=12,
+                    border=ft.border.all(1, BORDER_COLOR),
+                    alignment=ft.alignment.center,
+                    ink=True,
+                    on_click=lambda e: set_order_type('limit'),
+                )),
+                ft.Container(width=15),
+                (stop_btn := ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.icons.SHIELD_ROUNDED, size=32, color=TEXT_SECONDARY),
+                        ft.Container(height=8),
+                        ft.Text("Стоп-лимит", size=15, weight="bold", color=TEXT_PRIMARY),
+                        ft.Text("При достижении цены", size=11, color=TEXT_SECONDARY),
+                    ], horizontal_alignment="center", spacing=2),
+                    expand=True,
+                    padding=20,
+                    bgcolor=ft.colors.with_opacity(0.03, TEXT_SECONDARY),
+                    border_radius=12,
+                    border=ft.border.all(1, BORDER_COLOR),
+                    alignment=ft.alignment.center,
+                    ink=True,
+                    on_click=lambda e: set_order_type('stop-limit'),
+                )),
             ]),
-        ]),
-        padding=25,
-        bgcolor=CARD_BG,
         border_radius=12,
         border=ft.border.all(1, BORDER_COLOR),
     )
     
     # ==================== ИТОГОВЫЙ РАСЧЁТ ====================
+    # динамические поля в сводке
+    qty_summary = ft.Text("0.000 BTC", size=14, color=TEXT_PRIMARY, weight="bold")
+    price_summary = ft.Text("$0.00", size=14, color=TEXT_PRIMARY, weight="bold")
+    commission_summary = ft.Text("$0.00", size=14, color=WARNING_COLOR, weight="bold")
+    total_summary = ft.Text("$0.00", size=36, color=action_color, weight="bold")
+    total_equiv = ft.Text("≈ 0.000 BTC", size=13, color=TEXT_SECONDARY)
+
+    def update_summary():
+        try:
+            qty = float(quantity_field.value or 0)
+        except:
+            qty = 0.0
+        price = 0.0
+        try:
+            # выбираем цену в зависимости от типа ордера
+            if order_type in ('limit', 'stop-limit') and price_field.value:
+                price = float(price_field.value.replace(',','') or 0)
+            else:
+                price = float(price_value.value.replace('$','').replace(',','') or 0)
+        except:
+            price = 0.0
+        total = qty * price
+        commission = abs(total) * 0.001
+        qty_summary.value = f"{qty:.6f} {coin_name}"
+        price_summary.value = f"${price:,.2f}"
+        commission_summary.value = f"${commission:,.2f}"
+        total_summary.value = f"${(total + commission if buy_active else total - commission):,.2f}"
+        total_equiv.value = f"≈ {qty:.6f} {coin_name}"
+        page.update()
+
+    def set_order_type(new_type: str):
+        nonlocal order_type
+        order_type = new_type
+        # показываем/скрываем поля цены
+        price_field.visible = (order_type in ('limit', 'stop-limit'))
+        stop_price_field.visible = (order_type == 'stop-limit')
+        # подсветка выбранной кнопки
+        try:
+            # reset defaults
+            market_btn.bgcolor = ft.colors.with_opacity(0.1, PRIMARY_COLOR)
+            market_btn.content.controls[0].color = PRIMARY_COLOR
+            market_btn.content.controls[2].color = TEXT_PRIMARY
+            limit_btn.bgcolor = ft.colors.with_opacity(0.03, TEXT_SECONDARY)
+            limit_btn.content.controls[0].color = TEXT_SECONDARY
+            limit_btn.content.controls[2].color = TEXT_PRIMARY
+            stop_btn.bgcolor = ft.colors.with_opacity(0.03, TEXT_SECONDARY)
+            stop_btn.content.controls[0].color = TEXT_SECONDARY
+            stop_btn.content.controls[2].color = TEXT_PRIMARY
+            if order_type == 'market':
+                market_btn.bgcolor = PRIMARY_COLOR
+                market_btn.content.controls[0].color = DARK_BG
+                market_btn.content.controls[2].color = DARK_BG
+            elif order_type == 'limit':
+                limit_btn.bgcolor = PRIMARY_COLOR
+                limit_btn.content.controls[0].color = DARK_BG
+                limit_btn.content.controls[2].color = DARK_BG
+            elif order_type == 'stop-limit':
+                stop_btn.bgcolor = PRIMARY_COLOR
+                stop_btn.content.controls[0].color = DARK_BG
+                stop_btn.content.controls[2].color = DARK_BG
+        except NameError:
+            pass
+        # обновляем UI
+        update_action_button()
+        update_summary()
+        page.update()
+
+    def percent_select(pct: float):
+        try:
+            if side_selector_value == 'sell':
+                bal = query_balance(current_exchange, coin_name)
+                avail = float(bal.get('free') or 0) if bal else 0.0
+                amount = avail * pct
+            else:
+                bal = query_balance(current_exchange, 'USDT')
+                avail = float(bal.get('free') or 0) if bal else 0.0
+                # используем текущую цену для расчёта количества монет
+                try:
+                    price = float(price_value.value.replace('$','').replace(',','') or 0)
+                except:
+                    succ, curr = get_current_price(current_exchange, current_symbol, "", "")
+                    price = curr.get('last', 0) if succ else 0
+                if not price or price == 0:
+                    show_status("Не удалось получить цену для расчёта", "error")
+                    return
+                amount = (avail or 0) * pct / price
+            quantity_field.value = f"{amount:.6f}"
+        except Exception as e:
+            logger.error(f"[TRADING] Ошибка расчёта процента: {e}")
+        # подсветим выбранную кнопку процента
+        try:
+            clear_percent_highlight()
+            if pct == 0.25:
+                pct25_btn.bgcolor = PRIMARY_COLOR
+                pct25_btn.content.color = DARK_BG
+            elif pct == 0.5:
+                pct50_btn.bgcolor = PRIMARY_COLOR
+                pct50_btn.content.color = DARK_BG
+            elif pct == 0.75:
+                pct75_btn.bgcolor = PRIMARY_COLOR
+                pct75_btn.content.color = DARK_BG
+            elif pct == 1.0:
+                pctMax_btn.bgcolor = ft.colors.with_opacity(0.35, PRIMARY_COLOR)
+                pctMax_btn.content.color = DARK_BG
+        except NameError:
+            pass
+        update_summary()
+        page.update()
+
+    def clear_percent_highlight():
+        try:
+            pct25_btn.bgcolor = INPUT_BG
+            pct25_btn.content.color = TEXT_SECONDARY
+            pct50_btn.bgcolor = INPUT_BG
+            pct50_btn.content.color = TEXT_SECONDARY
+            pct75_btn.bgcolor = INPUT_BG
+            pct75_btn.content.color = TEXT_SECONDARY
+            pctMax_btn.bgcolor = ft.colors.with_opacity(0.15, PRIMARY_COLOR)
+            pctMax_btn.content.color = PRIMARY_COLOR
+        except NameError:
+            pass
+
     summary = ft.Container(
         content=ft.Row([
-            # Левая часть - детали
             ft.Container(
                 content=ft.Column([
                     ft.Text("ДЕТАЛИ ОРДЕРА", size=11, color=TEXT_SECONDARY, weight="bold"),
@@ -448,39 +778,35 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
                     ft.Row([
                         ft.Text("Количество", size=14, color=TEXT_SECONDARY),
                         ft.Container(expand=True),
-                        ft.Text("0.001 BTC", size=14, color=TEXT_PRIMARY, weight="bold"),
+                        qty_summary,
                     ]),
                     ft.Container(height=10),
                     ft.Row([
                         ft.Text("Цена исполнения", size=14, color=TEXT_SECONDARY),
                         ft.Container(expand=True),
-                        ft.Text("$104,250.00", size=14, color=TEXT_PRIMARY, weight="bold"),
+                        price_summary,
                     ]),
                     ft.Container(height=10),
                     ft.Row([
                         ft.Text("Комиссия (0.1%)", size=14, color=TEXT_SECONDARY),
                         ft.Container(expand=True),
-                        ft.Text("$0.10", size=14, color=WARNING_COLOR, weight="bold"),
+                        commission_summary,
                     ]),
                 ], spacing=0),
                 expand=True,
             ),
-            
-            # Разделитель
             ft.Container(
                 content=ft.VerticalDivider(width=1, color=BORDER_COLOR),
                 height=120,
                 padding=ft.padding.symmetric(horizontal=25),
             ),
-            
-            # Правая часть - итого
             ft.Container(
                 content=ft.Column([
                     ft.Text("ИТОГО К ОПЛАТЕ", size=11, color=TEXT_SECONDARY, weight="bold"),
                     ft.Container(height=10),
-                    ft.Text("$104.35", size=36, color=action_color, weight="bold"),
+                    total_summary,
                     ft.Container(height=5),
-                    ft.Text("≈ 0.001 BTC", size=13, color=TEXT_SECONDARY),
+                    total_equiv,
                 ], horizontal_alignment="center", spacing=0),
                 width=180,
             ),
@@ -490,6 +816,8 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         border_radius=12,
         border=ft.border.all(1, ft.colors.with_opacity(0.3, action_color)),
     )
+    # первоначальный расчет
+    update_summary()
     
     # ==================== ПРЕДУПРЕЖДЕНИЯ ====================
     warnings = ft.Container(
@@ -565,6 +893,55 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     )
     
     # ==================== КНОПКА ДЕЙСТВИЯ ====================
+    # helper для обновления кнопки после изменения состояния
+    action_button = None
+    def update_action_button():
+        if not action_button:
+            return
+        # иконка
+        icon_ctrl = action_button.content.controls[0]
+        text_ctrl = action_button.content.controls[2]
+        icon_ctrl.icon = ft.icons.ARROW_DOWNWARD_ROUNDED if buy_active else ft.icons.ARROW_UPWARD_ROUNDED
+        text_ctrl.value = f"{('КУПИТЬ' if buy_active else 'ПРОДАТЬ')} {coin_name}"
+        action_button.bgcolor = action_color
+        action_button.shadow.color = ft.colors.with_opacity(0.5, action_color)
+        page.update()
+
+    def execute_order(e):
+        # собираем параметры для отправки через backend.api.create_order
+        symbol = current_symbol
+        amount_str = quantity_field.value or "0"
+        try:
+            amount = float(amount_str)
+        except:
+            show_status("Неверное количество", "error")
+            return
+        price = None
+        # если выбран лимитный тип, пробуем взять значение из summary (или другое поле)
+        order_type = 'market'  # пока ограничимся рыночным
+        # находим API ключ
+        key = None
+        for k in user_keys:
+            if k.exchange_name == current_exchange:
+                key = k
+                break
+        if not key:
+            show_status("API ключ для биржи не найден", "error")
+            return
+        success, result = create_order(
+            current_exchange, symbol, side_selector_value, order_type,
+            amount, price,
+            key.api_key, key.secret_key, getattr(key, 'passphrase', None)
+        )
+        if success:
+            show_status("Ордер отправлен", "success")
+            logger.info(f"[TRADING] Ордер {side_selector_value} {amount} {symbol} на {current_exchange}")
+            # после отправки ордера стараемся обновить доступные средства из БД
+            update_available()
+            update_summary()
+        else:
+            show_status(str(result), "error")
+
     action_button = ft.Container(
         content=ft.Row([
             ft.Icon(
@@ -585,13 +962,22 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         border_radius=12,
         alignment=ft.alignment.center,
         ink=True,
+        on_click=execute_order,
         shadow=ft.BoxShadow(
             spread_radius=0,
             blur_radius=25,
             color=ft.colors.with_opacity(0.5, action_color),
         ),
     )
+    # обновим кнопку после создания
+    update_action_button()
+    # установить стартовое состояние бокового переключателя теперь, когда
+    # и update_summary, и update_action_button доступны
+    set_side(initial_side)
     
+    # после объявления всех элементов логики, загружаем символы
+    load_symbols(initial_exchange)
+
     # ==================== ОСНОВНОЙ КОНТЕНТ ====================
     content = ft.Column([
         header,
@@ -628,7 +1014,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         title=None,
         content=ft.Container(
             content=content,
-            width=700,
+            width=910,
             height=850,
             bgcolor=DARK_BG,
             border_radius=20,

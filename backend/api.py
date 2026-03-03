@@ -370,16 +370,29 @@ def create_order(exchange_name: str, symbol: str, side: str, order_type: str, am
             return False, f"Ошибка загрузки рынков: {str(e)[:100]}"
         
         if order_type == 'market':
-            # Для Gate.io и MEXC передаем цену для рыночных ордеров на покупку
-            if exchange_name == 'gateio' and side == 'buy' and price:
-                # Gate.io использует параметр cost
-                params = {'cost': amount * price}
-                order = exchange.create_order(symbol, 'market', side, amount, price, params)
-            elif exchange_name == 'mexc' and side == 'buy' and price:
-                # MEXC требует quoteOrderQty (стоимость в USDT) для рыночных покупок
-                params = {'quoteOrderQty': amount * price}
-                order = exchange.create_order(symbol, 'market', side, amount, None, params)
+            # Для некоторых бирж (Gate.io, MEXC) при market-buy требуется
+            # передать цену или стоимость, чтобы корректно рассчитать сумму.
+            # Если price не задан, попытаемся получить текущую цену через API.
+            if side == 'buy' and exchange_name in ('gateio', 'mexc'):
+                # если цена не передана, попробуем определить её
+                if not price or price <= 0:
+                    succ, res = get_current_price(exchange_name, symbol, api_key, secret_key, passphrase)
+                    if not succ:
+                        return False, f"Невозможно получить текущую цену для {exchange_name}: {res}"
+                    price = float(res.get('last', 0) or 0)
+                    if price <= 0:
+                        return False, f"Некорректная текущая цена: {price}"
+
+                if exchange_name == 'gateio':
+                    # Gate.io использует параметр cost (общая стоимость в квоте)
+                    params = {'cost': amount * price}
+                    order = exchange.create_order(symbol, 'market', side, amount, price, params)
+                else:  # mexc
+                    # MEXC требует quoteOrderQty (стоимость в USDT) для рыночных покупок
+                    params = {'quoteOrderQty': amount * price}
+                    order = exchange.create_order(symbol, 'market', side, amount, None, params)
             else:
+                # для прочих бирж используем стандартный market вызов
                 order = exchange.create_market_order(symbol, side, amount)
         else:
             order = exchange.create_limit_order(symbol, side, amount, price)
