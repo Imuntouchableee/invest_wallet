@@ -5,6 +5,65 @@ API модуль для работы с криптобиржами
 import ccxt
 from datetime import datetime
 
+from data.database import DatabaseManager
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _normalize_order_values(exchange, symbol: str, amount: float, price: float = None):
+    """Нормализует количество/цену под правила биржи и рынка."""
+    market = exchange.market(symbol)
+
+    normalized_amount = _safe_float(exchange.amount_to_precision(symbol, amount))
+    normalized_price = None
+    if price is not None:
+        normalized_price = _safe_float(exchange.price_to_precision(symbol, price))
+
+    amount_min = _safe_float((market.get('limits') or {}).get('amount', {}).get('min'))
+    cost_min = _safe_float((market.get('limits') or {}).get('cost', {}).get('min'))
+
+    if amount_min and normalized_amount < amount_min:
+        return False, None, None, (
+            f"Количество меньше минимального: {normalized_amount} < {amount_min}"
+        )
+
+    if normalized_price is not None and cost_min:
+        order_cost = normalized_amount * normalized_price
+        if order_cost < cost_min:
+            return False, None, None, (
+                f"Сумма ордера меньше минимальной: {order_cost:.8f} < {cost_min}"
+            )
+
+    return True, normalized_amount, normalized_price, None
+
+
+def _persist_exchange_balance(exchange_name: str, assets: dict):
+    """Синхронизирует live-баланс биржи с локальной БД."""
+    db = DatabaseManager()
+    if not db.connect():
+        return
+
+    try:
+        balance_data = {
+            asset_name: {
+                'free': asset_info.get('free', 0),
+                'locked': asset_info.get('used', 0),
+                'total': asset_info.get('total', 0),
+            }
+            for asset_name, asset_info in assets.items()
+            if isinstance(asset_info, dict)
+        }
+        db.save_balance(exchange_name, balance_data)
+    except Exception:
+        pass
+    finally:
+        db.close()
+
 
 def get_exchange_instance(exchange_name: str, api_key: str, secret_key: str, passphrase: str = None):
     """
@@ -14,27 +73,27 @@ def get_exchange_instance(exchange_name: str, api_key: str, secret_key: str, pas
         'apiKey': api_key,
         'secret': secret_key,
         'enableRateLimit': True,
+        'options': {
+            'recvWindow': 120000,
+            'adjustForTimeDifference': True,
+            'defaultType': 'spot',
+        },
     }
-    
+
     if exchange_name == 'bybit':
-        config['options'] = {
-            'recvWindow': 120000,  # Увеличиваем окно приема до 120 секунд
-            'adjustForTimeDifference': True,  # Автоматическая синхронизация времени
-            'defaultType': 'spot',  # Указываем тип рынка
-        }
         exchange = ccxt.bybit(config)
-        # Принудительная загрузка рынков и синхронизация времени
-        try:
-            exchange.load_markets()
-        except:
-            pass
-        return exchange
     elif exchange_name == 'gateio':
-        return ccxt.gateio(config)
+        exchange = ccxt.gateio(config)
     elif exchange_name == 'mexc':
-        return ccxt.mexc(config)
+        exchange = ccxt.mexc(config)
     else:
         raise ValueError(f"Неизвестная биржа: {exchange_name}")
+
+    try:
+        exchange.load_markets()
+    except Exception:
+        pass
+    return exchange
 
 
 def test_exchange_connection(exchange_name: str, api_key: str, secret_key: str, passphrase: str = None):
@@ -67,10 +126,17 @@ def fetch_balance_for_exchange(exchange_name: str, api_key: str, secret_key: str
         assets = {}
         for currency, data in balance.items():
             if isinstance(data, dict) and data.get('total', 0) > 0:
+                free_value = float(data.get('free', 0) or 0)
+                used_value = float(data.get('used', 0) or 0)
+                total_value = float(data.get('total', 0) or 0)
+
+                if free_value <= 0 and total_value > 0 and used_value <= 0:
+                    free_value = total_value
+
                 assets[currency] = {
-                    'free': float(data.get('free', 0) or 0),
-                    'used': float(data.get('used', 0) or 0),
-                    'total': float(data.get('total', 0) or 0),
+                    'free': free_value,
+                    'used': used_value,
+                    'total': total_value,
                 }
         
         return {
@@ -220,6 +286,8 @@ def fetch_user_portfolio(user_exchange_keys: list):
         )
         
         if balance_data['status'] == 'success':
+            _persist_exchange_balance(exchange_name, balance_data['assets'])
+
             # Рассчитываем стоимость
             calc = calculate_portfolio_value(balance_data['assets'], price_exchange)
             
@@ -340,7 +408,7 @@ def create_order(exchange_name: str, symbol: str, side: str, order_type: str, am
     """
     Создает ордер на бирже
     side: 'buy' или 'sell'
-    order_type: 'market' или 'limit'
+    order_type: 'market', 'limit' или 'stop-limit'
     
     Возвращает (success: bool, result: dict или сообщение об ошибке)
     """
@@ -368,41 +436,93 @@ def create_order(exchange_name: str, symbol: str, side: str, order_type: str, am
                 return False, f"Символ {symbol} не доступен на бирже {exchange_name}. Используйте доступные пары."
         except Exception as e:
             return False, f"Ошибка загрузки рынков: {str(e)[:100]}"
-        
-        if order_type == 'market':
-            # Для некоторых бирж (Gate.io, MEXC) при market-buy требуется
-            # передать цену или стоимость, чтобы корректно рассчитать сумму.
-            # Если price не задан, попытаемся получить текущую цену через API.
-            if side == 'buy' and exchange_name in ('gateio', 'mexc'):
-                # если цена не передана, попробуем определить её
-                if not price or price <= 0:
-                    succ, res = get_current_price(exchange_name, symbol, api_key, secret_key, passphrase)
-                    if not succ:
-                        return False, f"Невозможно получить текущую цену для {exchange_name}: {res}"
-                    price = float(res.get('last', 0) or 0)
-                    if price <= 0:
-                        return False, f"Некорректная текущая цена: {price}"
 
+        normalized_price = price
+        if price is not None and price > 0:
+            normalized_price = _safe_float(price)
+
+        ok, normalized_amount, normalized_price, validation_error = _normalize_order_values(
+            exchange,
+            symbol,
+            amount,
+            normalized_price,
+        )
+        if not ok:
+            return False, validation_error
+
+        market_price = normalized_price
+        if order_type in ('market', 'stop-limit') and (market_price is None or market_price <= 0):
+            succ, res = get_current_price(
+                exchange_name,
+                symbol,
+                api_key,
+                secret_key,
+                passphrase,
+            )
+            if succ:
+                market_price = _safe_float(res.get('last'))
+
+        if order_type == 'stop-limit':
+            # unified stop-limit поддерживается не всеми биржами одинаково,
+            # поэтому используем limit c параметром stopPrice где возможно.
+            if not normalized_price or normalized_price <= 0:
+                return False, "Для стоп-лимит ордера требуется цена"
+            params = {'stopPrice': normalized_price}
+            order = exchange.create_order(
+                symbol,
+                'limit',
+                side,
+                normalized_amount,
+                normalized_price,
+                params,
+            )
+        elif order_type == 'market':
+            # Для некоторых бирж рыночная покупка требует стоимость в валюте котировки.
+            if side == 'buy' and exchange_name in ('gateio', 'mexc'):
+                if not market_price or market_price <= 0:
+                    return False, f"Невозможно получить текущую цену для {exchange_name}"
+
+                cost_value = normalized_amount * market_price
                 if exchange_name == 'gateio':
-                    # Gate.io использует параметр cost (общая стоимость в квоте)
-                    params = {'cost': amount * price}
-                    order = exchange.create_order(symbol, 'market', side, amount, price, params)
+                    cost_value = _safe_float(exchange.cost_to_precision(symbol, cost_value))
+                    params = {'cost': cost_value}
+                    order = exchange.create_order(
+                        symbol,
+                        'market',
+                        side,
+                        normalized_amount,
+                        None,
+                        params,
+                    )
                 else:  # mexc
-                    # MEXC требует quoteOrderQty (стоимость в USDT) для рыночных покупок
-                    params = {'quoteOrderQty': amount * price}
-                    order = exchange.create_order(symbol, 'market', side, amount, None, params)
+                    cost_value = _safe_float(exchange.cost_to_precision(symbol, cost_value))
+                    params = {'quoteOrderQty': cost_value}
+                    order = exchange.create_order(
+                        symbol,
+                        'market',
+                        side,
+                        normalized_amount,
+                        None,
+                        params,
+                    )
             else:
-                # для прочих бирж используем стандартный market вызов
-                order = exchange.create_market_order(symbol, side, amount)
+                order = exchange.create_market_order(symbol, side, normalized_amount)
         else:
-            order = exchange.create_limit_order(symbol, side, amount, price)
+            if not normalized_price or normalized_price <= 0:
+                return False, "Для лимитного ордера требуется цена"
+            order = exchange.create_limit_order(
+                symbol,
+                side,
+                normalized_amount,
+                normalized_price,
+            )
         
         return True, {
             'order_id': order.get('id', ''),
             'symbol': order.get('symbol', symbol),
             'side': side,
-            'amount': amount,
-            'price': price,
+            'amount': normalized_amount,
+            'price': normalized_price,
             'timestamp': datetime.now().isoformat(),
             'status': order.get('status', 'pending'),
         }

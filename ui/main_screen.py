@@ -18,6 +18,22 @@ from backend.api import fetch_user_portfolio
 logger = logging.getLogger(__name__)
 
 
+def _make_trade_handler(show_trading_callback, asset=None, exchange_name=None,
+                        side=None):
+    """Фиксирует параметры открытия торгового окна без проблем замыканий."""
+
+    frozen_asset = dict(asset) if isinstance(asset, dict) else asset
+
+    def handler(e):
+        show_trading_callback(
+            asset=frozen_asset,
+            exchange_name=exchange_name,
+            side=side,
+        )
+
+    return handler
+
+
 def show_no_exchanges_screen(page: ft.Page, show_add_exchange_callback, logout_callback):
     """Экран, когда нет подключенных бирж"""
     page.controls.clear()
@@ -237,7 +253,12 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                                     border_radius=8,
                                     bgcolor=SUCCESS_COLOR,
                                     alignment=ft.alignment.center,
-                                    on_click=lambda e, a=asset, ex=exchange_name: show_trading_callback(a, ex, "buy"),
+                                    on_click=_make_trade_handler(
+                                        show_trading_callback,
+                                        asset=asset,
+                                        exchange_name=exchange_name,
+                                        side="buy",
+                                    ),
                                     ink=True,
                                     tooltip="Купить",
                                 ),
@@ -247,7 +268,12 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                                     border_radius=8,
                                     bgcolor=ACCENT_COLOR,
                                     alignment=ft.alignment.center,
-                                    on_click=lambda e, a=asset, ex=exchange_name: show_trading_callback(a, ex, "sell"),
+                                    on_click=_make_trade_handler(
+                                        show_trading_callback,
+                                        asset=asset,
+                                        exchange_name=exchange_name,
+                                        side="sell",
+                                    ),
                                     ink=True,
                                     tooltip="Продать",
                                 ),
@@ -302,7 +328,11 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                                 bgcolor=BUY_COLOR,
                                 alignment=ft.alignment.center,
                                 ink=True,
-                                on_click=lambda e, ex=exchange_name: show_trading_callback(None, ex, "buy"),
+                                on_click=_make_trade_handler(
+                                    show_trading_callback,
+                                    exchange_name=exchange_name,
+                                    side="buy",
+                                ),
                             ),
                             ft.Container(width=8),
                             ft.Container(
@@ -317,7 +347,11 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                                 bgcolor=SELL_COLOR,
                                 alignment=ft.alignment.center,
                                 ink=True,
-                                on_click=lambda e, ex=exchange_name: show_trading_callback(None, ex, "sell"),
+                                on_click=_make_trade_handler(
+                                    show_trading_callback,
+                                    exchange_name=exchange_name,
+                                    side="sell",
+                                ),
                             ),
                         ], spacing=6),
                     ], vertical_alignment="center"),
@@ -406,7 +440,12 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                             border_radius=8,
                             bgcolor=SUCCESS_COLOR,
                             alignment=ft.alignment.center,
-                            on_click=lambda e, a=asset, ex=asset['exchange']: show_trading_callback(a, ex, "buy"),
+                            on_click=_make_trade_handler(
+                                show_trading_callback,
+                                asset=asset,
+                                exchange_name=asset['exchange'],
+                                side="buy",
+                            ),
                             ink=True,
                             tooltip="Купить",
                         ),
@@ -416,7 +455,12 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                             border_radius=8,
                             bgcolor=ACCENT_COLOR,
                             alignment=ft.alignment.center,
-                            on_click=lambda e, a=asset, ex=asset['exchange']: show_trading_callback(a, ex, "sell"),
+                            on_click=_make_trade_handler(
+                                show_trading_callback,
+                                asset=asset,
+                                exchange_name=asset['exchange'],
+                                side="sell",
+                            ),
                             ink=True,
                             tooltip="Продать",
                         ),

@@ -105,7 +105,7 @@ python view.py
 
 - **Flet** - UI фреймворк (Python)
 - **SQLAlchemy** - ORM для БД
-- **SQLite** - база данных
+- **PostgreSQL** - единая база данных приложения
 - **CCXT** - API криптобирж
 - **Matplotlib** - графики
 - **Scikit-learn** - ML модели

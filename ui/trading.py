@@ -5,7 +5,11 @@
 import flet as ft
 from logging import getLogger
 from data.database import DatabaseManager
-from backend.api import get_current_price, create_order
+from backend.api import (
+    get_current_price,
+    create_order,
+    fetch_balance_for_exchange,
+)
 from ui.config import (
     PRIMARY_COLOR, ACCENT_COLOR, SUCCESS_COLOR, WARNING_COLOR, 
     TEXT_PRIMARY, TEXT_SECONDARY, DARK_BG, CARD_BG, INPUT_BG, BORDER_COLOR,
@@ -34,17 +38,41 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         return
     
     # Начальные значения
+    asset_currency = None
+    asset_exchange = None
+    if isinstance(asset, dict):
+        asset_currency = asset.get('currency')
+        asset_exchange = asset.get('exchange')
+
     initial_side = side or "buy"
-    initial_symbol = f"{asset['currency']}/USDT" if asset else "BTC/USDT"
-    initial_exchange = exchange_name or (user_keys[0].exchange_name if user_keys else "bybit")
+    initial_symbol = (
+        f"{asset_currency}/USDT" if asset_currency else "BTC/USDT"
+    )
+    initial_exchange = (
+        exchange_name
+        or asset_exchange
+        or (user_keys[0].exchange_name if user_keys else "bybit")
+    )
     
-    logger.info(f"[TRADING] Инициализация: пара={initial_symbol}, биржа={initial_exchange}, сторона={initial_side}")
+    logger.info(
+        f"[TRADING] Инициализация: пара={initial_symbol}, "
+        f"биржа={initial_exchange}, сторона={initial_side}"
+    )
     
     # подключение к локальной БД, где хранятся пары и балансы
     db = DatabaseManager()
     if not db.connect():
         # показать статус позже, когда определим функцию show_status
         logger.error("[TRADING] Не удалось подключиться к локальной БД")
+
+    exchange_key_map = {k.exchange_name: k for k in user_keys}
+    live_balance_cache = {}
+
+    def to_float(value, default=0.0):
+        try:
+            return float(value)
+        except Exception:
+            return default
     
     # функции доступа к локальным таблицам
     def query_pair_info(exchange, symbol):
@@ -66,17 +94,123 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         return {}
     
     def query_balance(exchange, asset):
+        asset_variants = [asset]
+        asset_upper = str(asset or '').upper()
+        asset_lower = str(asset or '').lower()
+        if asset_upper not in asset_variants:
+            asset_variants.append(asset_upper)
+        if asset_lower not in asset_variants:
+            asset_variants.append(asset_lower)
+
         try:
-            db.cursor.execute(
-                f"SELECT free, locked, total FROM {exchange}_balance WHERE asset=%s",
-                (asset,)
-            )
-            row = db.cursor.fetchone()
-            if row:
-                return {'free': row[0], 'locked': row[1], 'total': row[2]}
+            for asset_name in asset_variants:
+                db.cursor.execute(
+                    f"SELECT free, locked, total FROM {exchange}_balance "
+                    f"WHERE asset=%s",
+                    (asset_name,)
+                )
+                row = db.cursor.fetchone()
+                if row:
+                    db_balance = {
+                        'free': row[0],
+                        'locked': row[1],
+                        'total': row[2],
+                    }
+                    try:
+                        db_free = float(db_balance.get('free') or 0)
+                    except Exception:
+                        db_free = 0.0
+                    if db_free > 0:
+                        return db_balance
+                    break
         except Exception as e:
             logger.error(f"[TRADING] Ошибка запроса баланса из БД: {e}")
+
+        live_balances = live_balance_cache.get(exchange)
+        if live_balances is None:
+            key = exchange_key_map.get(exchange)
+            if key:
+                live_result = fetch_balance_for_exchange(
+                    exchange,
+                    key.api_key,
+                    key.secret_key,
+                    getattr(key, 'passphrase', None),
+                )
+                if live_result.get('status') == 'success':
+                    live_balances = live_result.get('assets', {})
+                    live_balance_cache[exchange] = live_balances
+                else:
+                    logger.warning(
+                        f"[TRADING] Не удалось получить live-баланс {exchange}: "
+                        f"{live_result.get('error')}"
+                    )
+                    live_balance_cache[exchange] = {}
+                    live_balances = {}
+            else:
+                live_balances = {}
+
+        for asset_name in asset_variants:
+            live_balance = live_balances.get(asset_name)
+            if live_balance:
+                return {
+                    'free': live_balance.get('free', 0),
+                    'locked': live_balance.get('used', 0),
+                    'total': live_balance.get('total', 0),
+                }
         return {}
+
+    def get_effective_available_amount(balance_data):
+        if not balance_data:
+            return 0.0
+
+        free_amount = to_float(balance_data.get('free'))
+        locked_amount = to_float(balance_data.get('locked'))
+        total_amount = to_float(balance_data.get('total'))
+
+        if free_amount > 0:
+            return free_amount
+        if total_amount > 0:
+            if locked_amount > 0 and total_amount >= locked_amount:
+                return max(total_amount - locked_amount, 0.0)
+            return total_amount
+        return 0.0
+
+    def find_first_sellable_symbol(exchange, symbols):
+        symbol_set = set(symbols)
+        candidate_assets = []
+
+        try:
+            db.cursor.execute(
+                f"SELECT asset, free FROM {exchange}_balance "
+                f"WHERE free IS NOT NULL AND free::numeric > 0"
+            )
+            candidate_assets.extend(db.cursor.fetchall())
+        except Exception as e:
+            logger.error(
+                f"[TRADING] Ошибка поиска доступных активов для продажи: {e}"
+            )
+
+        live_balances = live_balance_cache.get(exchange)
+        if live_balances is None:
+            query_balance(exchange, 'USDT')
+            live_balances = live_balance_cache.get(exchange, {})
+
+        for asset_name, live_info in live_balances.items():
+            candidate_assets.append((asset_name, live_info.get('free', 0)))
+
+        for asset_name, free_amount in candidate_assets:
+            if str(asset_name).upper() in ('USDT', 'USDC', 'BUSD', 'DAI'):
+                continue
+            try:
+                if to_float(free_amount) <= 0:
+                    continue
+            except Exception:
+                continue
+
+            candidate = f"{asset_name}/USDT"
+            if candidate in symbol_set:
+                return candidate
+        return None
     
     def close_dialog():
         logger.info("[TRADING] Закрытие торгового терминала")
@@ -172,6 +306,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     current_exchange = initial_exchange
     current_symbol = initial_symbol
     side_selector_value = initial_side
+    initial_prefill_pending = asset is not None
     # имя монеты из символа
     coin_name = current_symbol.split("/")[0] if "/" in current_symbol else current_symbol
 
@@ -179,17 +314,25 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     available_text = ft.Text("", size=12, color=PRIMARY_COLOR, weight="bold")
 
     # утилиты для обновления UI
-    def load_symbols(exchange):
+    def load_symbols(exchange, preferred_symbol=None):
+        nonlocal current_symbol
         symbols = []
         try:
-            db.cursor.execute(f"SELECT symbol FROM {exchange}_pairs ORDER BY symbol LIMIT 100")
+            db.cursor.execute(f"SELECT symbol FROM {exchange}_pairs ORDER BY symbol")
             symbols = [r[0] for r in db.cursor.fetchall()]
         except Exception as e:
             logger.error(f"[TRADING] Не удалось загрузить символы из БД: {e}")
         symbol_dropdown.options = [ft.dropdown.Option(s) for s in symbols]
         if symbols:
-            symbol_dropdown.value = symbols[0]
-            on_symbol_changed(symbols[0])
+            selected_symbol = preferred_symbol or current_symbol or initial_symbol
+            if selected_symbol not in symbols:
+                if side_selector_value == 'sell':
+                    selected_symbol = find_first_sellable_symbol(exchange, symbols)
+                if selected_symbol not in symbols:
+                    selected_symbol = symbols[0]
+            current_symbol = selected_symbol
+            symbol_dropdown.value = selected_symbol
+            on_symbol_changed(selected_symbol)
 
     def on_exchange_changed(e):
         nonlocal current_exchange
@@ -200,12 +343,12 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             "gateio": "Gate.io",
             "mexc": "MEXC"
         }.get(current_exchange, current_exchange.upper())
-        load_symbols(current_exchange)
+        load_symbols(current_exchange, current_symbol)
         update_available()
         page.update()
 
     def on_symbol_changed(value):
-        nonlocal current_symbol, coin_name
+        nonlocal current_symbol, coin_name, initial_prefill_pending, last_edited_field
         current_symbol = value
         coin_name = current_symbol.split("/")[0]
         # обновляем подписи полей
@@ -246,25 +389,38 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         except NameError:
             pass
         try:
+            if initial_prefill_pending and asset and current_symbol == initial_symbol:
+                if side_selector_value == 'sell':
+                    available_qty, _ = get_available_balance_value()
+                    initial_qty = available_qty or float(asset.get('amount', 0) or 0)
+                    quantity_field.value = f"{initial_qty:.6f}"
+                    amount_field.value = f"{initial_qty * get_effective_price():.2f}"
+                    last_edited_field = "quantity"
+                else:
+                    amount_field.value = f"{float(asset.get('value_usd', 0) or 0):.2f}"
+                    last_edited_field = "amount"
+                initial_prefill_pending = False
+        except Exception as e:
+            logger.error(f"[TRADING] Ошибка предзаполнения формы: {e}")
+        try:
             recalculate_inputs()
         except NameError:
             pass
         page.update()
 
-    def update_available():
+    def get_available_balance_value():
         if side_selector_value == 'sell':
             bal = query_balance(current_exchange, coin_name)
             label_asset = coin_name
         else:
             bal = query_balance(current_exchange, 'USDT')
             label_asset = 'USDT'
-        # balance query may return None values for fields, ensure we format safely
-        avail = 0
-        if bal:
-            # bal.get could return None if the DB row has NULL
-            avail = bal.get('free')
-            if avail is None:
-                avail = 0
+
+        avail = get_effective_available_amount(bal)
+        return avail, label_asset
+
+    def update_available():
+        avail, label_asset = get_available_balance_value()
         available_text.value = f"{avail:.6f} {label_asset}"
         page.update()
 
@@ -838,24 +994,30 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         try:
             price = get_effective_price()
             if side_selector_value == 'sell':
-                bal = query_balance(current_exchange, coin_name)
-                avail = float(bal.get('free') or 0) if bal else 0.0
+                avail, _ = get_available_balance_value()
+                if avail <= 0:
+                    show_status(f"Нет доступного баланса {coin_name} для продажи", "warning")
+                    return
                 amount = avail * pct
                 quantity_field.value = f"{amount:.6f}"
-                amount_field.value = f"{amount * price:.2f}" if price > 0 else "0.00"
                 last_edited_field = "quantity"
+                sync_from_quantity()
             else:
-                bal = query_balance(current_exchange, 'USDT')
-                avail = float(bal.get('free') or 0) if bal else 0.0
+                avail, _ = get_available_balance_value()
+                if avail <= 0:
+                    show_status("Нет доступного баланса USDT для покупки", "warning")
+                    return
                 if not price or price == 0:
                     show_status("Не удалось получить цену для расчёта", "error")
                     return
                 total_amount = (avail or 0) * pct
                 amount_field.value = f"{total_amount:.2f}"
-                quantity_field.value = f"{(total_amount / price):.6f}"
                 last_edited_field = "amount"
+                sync_from_amount()
         except Exception as e:
             logger.error(f"[TRADING] Ошибка расчёта процента: {e}")
+            show_status("Ошибка перерасчёта количества", "error")
+            return
         # подсветим выбранную кнопку процента
         try:
             clear_percent_highlight()
@@ -1037,8 +1199,36 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             show_status("Неверное количество", "error")
             return
         price = None
-        # если выбран лимитный тип, пробуем взять значение из summary (или другое поле)
-        order_type = 'market'  # пока ограничимся рыночным
+        selected_order_type = order_type
+        pair_info = query_pair_info(current_exchange, symbol)
+
+        if selected_order_type in ('limit', 'stop-limit'):
+            try:
+                price = float((price_field.value or "0").replace(',', '.'))
+            except:
+                show_status("Неверная цена лимитного ордера", "error")
+                return
+
+        min_order_amount = float(pair_info.get('min_order_amount') or 0) if pair_info else 0.0
+        if min_order_amount and amount < min_order_amount:
+            show_status(
+                f"Количество меньше минимального ордера: {min_order_amount}",
+                "error",
+            )
+            return
+
+        if side_selector_value == 'sell':
+            available_qty, _ = get_available_balance_value()
+            if available_qty <= 0:
+                show_status(f"Нет доступного баланса {coin_name} для продажи", "error")
+                return
+            if amount > available_qty:
+                show_status(
+                    f"Недостаточно {coin_name}: доступно {available_qty:.6f}",
+                    "error",
+                )
+                return
+
         # находим API ключ
         key = None
         for k in user_keys:
@@ -1049,13 +1239,16 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             show_status("API ключ для биржи не найден", "error")
             return
         success, result = create_order(
-            current_exchange, symbol, side_selector_value, order_type,
+            current_exchange, symbol, side_selector_value, selected_order_type,
             amount, price,
             key.api_key, key.secret_key, getattr(key, 'passphrase', None)
         )
         if success:
             show_status("Ордер отправлен", "success")
-            logger.info(f"[TRADING] Ордер {side_selector_value} {amount} {symbol} на {current_exchange}")
+            logger.info(
+                f"[TRADING] Ордер {side_selector_value} {result.get('amount')} "
+                f"{symbol} ({selected_order_type}) на {current_exchange}"
+            )
             # после отправки ордера стараемся обновить доступные средства из БД
             update_available()
             update_summary()
@@ -1096,7 +1289,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     set_side(initial_side)
     
     # после объявления всех элементов логики, загружаем символы
-    load_symbols(initial_exchange)
+    load_symbols(initial_exchange, initial_symbol)
 
     # ==================== ОСНОВНОЙ КОНТЕНТ ====================
     content = ft.Column([

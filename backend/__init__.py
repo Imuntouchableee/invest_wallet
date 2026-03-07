@@ -1,7 +1,15 @@
 """
 Backend модули приложения Invest Wallet
 """
-from backend.models import User, ExchangeAPIKey, PortfolioHistory, session, engine, Base
+from backend.models import (
+    User,
+    ExchangeAPIKey,
+    PortfolioHistory,
+    session,
+    engine,
+    Base,
+    SessionLocal,
+)
 from backend.api import (
     get_exchange_instance,
     test_exchange_connection,
@@ -23,6 +31,7 @@ from backend.email_service import (
 __all__ = [
     # Models
     'User', 'ExchangeAPIKey', 'PortfolioHistory', 'session', 'engine', 'Base',
+    'SessionLocal',
     # API
     'get_exchange_instance', 'test_exchange_connection', 'fetch_user_portfolio',
     'fetch_balance_for_exchange', 'calculate_portfolio_value', 'fetch_coin_prices',

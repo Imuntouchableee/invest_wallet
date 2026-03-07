@@ -1,9 +1,18 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Float, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    create_engine,
+)
+from sqlalchemy.orm import relationship, sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from datetime import datetime
+
+from data.config import DATABASE
 
 
 Base = declarative_base()
@@ -37,8 +46,16 @@ class User(Base):
     last_login = Column(DateTime, default=datetime.now)
     
     # Связи
-    exchange_keys = relationship("ExchangeAPIKey", back_populates="user", cascade="all, delete-orphan")
-    portfolio_history = relationship("PortfolioHistory", back_populates="user", cascade="all, delete-orphan")
+    exchange_keys = relationship(
+        "ExchangeAPIKey",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    portfolio_history = relationship(
+        "PortfolioHistory",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self):
         return f"User('{self.name}', email='{self.email}')"
@@ -63,7 +80,10 @@ class ExchangeAPIKey(Base):
     user = relationship("User", back_populates="exchange_keys")
     
     def __repr__(self):
-        return f"ExchangeAPIKey(user={self.user_id}, exchange='{self.exchange_name}')"
+        return (
+            f"ExchangeAPIKey(user={self.user_id}, "
+            f"exchange='{self.exchange_name}')"
+        )
 
 
 class PortfolioHistory(Base):
@@ -85,10 +105,25 @@ class PortfolioHistory(Base):
     user = relationship("User", back_populates="portfolio_history")
 
 
+def build_postgres_url() -> str:
+    """Собирает SQLAlchemy URL для PostgreSQL из общего конфига."""
+    return (
+        f"postgresql+psycopg2://{DATABASE['user']}:{DATABASE['password']}"
+        f"@{DATABASE['host']}:{DATABASE['port']}/{DATABASE['database']}"
+    )
+
+
+SQLALCHEMY_DATABASE_URL = build_postgres_url()
+
+
 # Подключение к БД
-engine = create_engine('sqlite:///database.db', connect_args={'check_same_thread': False}, pool_pre_ping=True, pool_recycle=3600)
-Session = sessionmaker(bind=engine)
-session = Session()
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+session = SessionLocal()
 
 # Создаём таблицы
 Base.metadata.create_all(engine)

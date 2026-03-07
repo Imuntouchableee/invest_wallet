@@ -7,22 +7,16 @@
     python exchange_price_fetcher.py
 
 Зависимости:
-    pip install ccxt sqlalchemy
+    pip install ccxt sqlalchemy psycopg2-binary
 """
 import ccxt
 import json
 from datetime import datetime
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+
+from backend.models import ExchangeAPIKey, SessionLocal
 
 
-# Подключаемся к БД
-engine = create_engine('sqlite:///database.db', connect_args={'check_same_thread': False})
-Session = sessionmaker(bind=engine)
-session = Session()
-
-# Импортируем модель после создания движка
-from backend.models import ExchangeAPIKey
+session = SessionLocal()
 
 
 def get_exchange_instance(exchange_name: str, api_key: str, secret_key: str, passphrase: str = None):
