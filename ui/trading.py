@@ -3,6 +3,22 @@
 Профессиональный дизайн торгового интерфейса
 """
 import flet as ft
+from logging import getLogger
+from data.database import DatabaseManager
+from backend.api import get_current_price, create_order
+from ui.config import (
+    PRIMARY_COLOR, ACCENT_COLOR, SUCCESS_COLOR, WARNING_COLOR, 
+    TEXT_PRIMARY, TEXT_SECONDARY, DARK_BG, CARD_BG, INPUT_BG, BORDER_COLOR,
+    EXCHANGE_NAMES
+)
+
+logger = getLogger(__name__)
+
+
+def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
+                        asset=None, exchange_name=None, side=None):
+    """Профессиональный торговый терминал"""
+    
     # Проверка наличия API ключей
     if not user_keys:
         logger.warning("[TRADING] Нет подключенных бирж!")
@@ -192,8 +208,12 @@ import flet as ft
         nonlocal current_symbol, coin_name
         current_symbol = value
         coin_name = current_symbol.split("/")[0]
-        # обновляем суффикс поля количества
-        quantity_field.suffix_text = coin_name if side_selector_value == 'sell' else 'USDT'
+        # обновляем подписи полей
+        try:
+            quantity_field.suffix_text = coin_name
+            amount_field.suffix_text = "USDT"
+        except NameError:
+            pass
         # данные из базы
         info = query_pair_info(current_exchange, current_symbol)
         if info:
@@ -221,6 +241,14 @@ import flet as ft
             lot_size_label.value = "?"
         update_action_button()
         update_available()
+        try:
+            clear_percent_highlight()
+        except NameError:
+            pass
+        try:
+            recalculate_inputs()
+        except NameError:
+            pass
         page.update()
 
     def update_available():
@@ -401,11 +429,11 @@ import flet as ft
         sell_btn.bgcolor = SELL_COLOR if sell_active else ft.colors.with_opacity(0.1, SELL_COLOR)
         sell_btn.content.controls[0].color = DARK_BG if sell_active else SELL_COLOR
         sell_btn.content.controls[2].color = DARK_BG if sell_active else SELL_COLOR
-        # обновляем суффикс поля количества
+        # обновляем подписи полей
         try:
-            quantity_field.suffix_text = coin_name if sell_active else 'USDT'
+            quantity_field.suffix_text = coin_name
+            amount_field.suffix_text = 'USDT'
         except NameError:
-            # quantity_field may not be initialized yet during startup
             pass
         # these helper functions might not be defined yet when set_side is
         # invoked during the initial dialog setup, so guard against NameError.
@@ -415,6 +443,14 @@ import flet as ft
             pass
         try:
             update_summary()
+        except NameError:
+            pass
+        try:
+            clear_percent_highlight()
+        except NameError:
+            pass
+        try:
+            recalculate_inputs()
         except NameError:
             pass
         try:
@@ -468,7 +504,7 @@ import flet as ft
             ft.Container(height=15),
             ft.Row([
                 # Рыночный
-                ft.Container(
+                (market_btn := ft.Container(
                     content=ft.Column([
                         ft.Icon(ft.icons.FLASH_ON_ROUNDED, size=32, color=PRIMARY_COLOR),
                         ft.Container(height=8),
@@ -484,130 +520,9 @@ import flet as ft
                     alignment=ft.alignment.center,
                     ink=True,
                     on_click=lambda e: set_order_type('market'),
-                ),
-                ft.Container(width=15),
-                # Лимитный
-                ft.Container(
-                    content=ft.Column([
-                        ft.Icon(ft.icons.SCHEDULE_ROUNDED, size=32, color=TEXT_SECONDARY),
-                        ft.Container(height=8),
-                        ft.Text("Лимитный", size=15, weight="bold", color=TEXT_PRIMARY),
-                        ft.Text("По указанной цене", size=11, color=TEXT_SECONDARY),
-                    ], horizontal_alignment="center", spacing=2),
-                    expand=True,
-                    padding=20,
-                    bgcolor=ft.colors.with_opacity(0.03, TEXT_SECONDARY),
-                    border_radius=12,
-                    border=ft.border.all(1, BORDER_COLOR),
-                    alignment=ft.alignment.center,
-                    ink=True,
-                    on_click=lambda e: set_order_type('limit'),
-                ),
-                ft.Container(width=15),
-                # Стоп-лимит
-                ft.Container(
-                    content=ft.Column([
-                        ft.Icon(ft.icons.SHIELD_ROUNDED, size=32, color=TEXT_SECONDARY),
-                        ft.Container(height=8),
-                        ft.Text("Стоп-лимит", size=15, weight="bold", color=TEXT_PRIMARY),
-                        ft.Text("При достижении цены", size=11, color=TEXT_SECONDARY),
-                    ], horizontal_alignment="center", spacing=2),
-                    expand=True,
-                    padding=20,
-                    bgcolor=ft.colors.with_opacity(0.03, TEXT_SECONDARY),
-                    border_radius=12,
-                    border=ft.border.all(1, BORDER_COLOR),
-                    alignment=ft.alignment.center,
-                    ink=True,
-                    on_click=lambda e: set_order_type('stop-limit'),
-                ),
-            ]),
-        ]),
-        padding=25,
-        bgcolor=CARD_BG,
-        border_radius=12,
-        border=ft.border.all(1, BORDER_COLOR),
-    )
-    
-    # ==================== ФОРМА ВВОДА ====================
-    # поле ввода количества, сохраняем для последующего чтения
-    def quantity_changed(e):
-        clear_percent_highlight()
-        update_summary()
-
-    quantity_field = ft.TextField(
-        value="0.001",
-        expand=True,
-        height=60,
-        bgcolor=INPUT_BG,
-        border_color=BORDER_COLOR,
-        focused_border_color=PRIMARY_COLOR,
-        text_size=20,
-        text_align="right",
-        suffix_text=coin_name,
-        content_padding=ft.padding.symmetric(horizontal=20, vertical=15),
-        on_change=quantity_changed,
-    )
-
-    # поля цены для лимитных ордеров
-    price_field = ft.TextField(
-        value="",
-        hint_text="Цена",
-        expand=True,
-        height=50,
-        visible=False,
-        bgcolor=INPUT_BG,
-        border_color=BORDER_COLOR,
-        focused_border_color=PRIMARY_COLOR,
-        text_size=16,
-        text_align="right",
-        content_padding=ft.padding.symmetric(horizontal=12, vertical=12),
-        on_change=lambda e: update_summary(),
-    )
-
-    stop_price_field = ft.TextField(
-        value="",
-        hint_text="Стоп-цена",
-        expand=True,
-        height=50,
-        visible=False,
-        bgcolor=INPUT_BG,
-        border_color=BORDER_COLOR,
-        focused_border_color=PRIMARY_COLOR,
-        text_size=16,
-        text_align="right",
-        content_padding=ft.padding.symmetric(horizontal=12, vertical=12),
-        on_change=lambda e: update_summary(),
-    )
-
-    input_form = ft.Container(
-        content=ft.Column([
-            # Количество
-            ft.Row([
-                ft.Text("КОЛИЧЕСТВО", size=11, color=TEXT_SECONDARY, weight="bold"),
-                ft.Container(expand=True),
-                ft.Text("Доступно: ", size=12, color=TEXT_SECONDARY),
-                available_text,
-            ]),
-            # кнопки выбора типа ордера — вынесены в переменные для подсветки
-            ft.Row([
-                (market_btn := ft.Container(
-                    content=ft.Column([
-                        ft.Icon(ft.icons.FLASH_ON_ROUNDED, size=32, color=PRIMARY_COLOR),
-                        ft.Container(height=8),
-                        ft.Text("Рыночный", size=15, weight="bold", color=TEXT_PRIMARY),
-                        ft.Text("Моментальное исполнение", size=11, color=TEXT_SECONDARY),
-                    ], horizontal_alignment="center", spacing=2),
-                    expand=True,
-                    padding=20,
-                    bgcolor=ft.colors.with_opacity(0.1, PRIMARY_COLOR),
-                    border_radius=12,
-                    border=ft.border.all(1, BORDER_COLOR),
-                    alignment=ft.alignment.center,
-                    ink=True,
-                    on_click=lambda e: set_order_type('market'),
                 )),
                 ft.Container(width=15),
+                # Лимитный
                 (limit_btn := ft.Container(
                     content=ft.Column([
                         ft.Icon(ft.icons.SCHEDULE_ROUNDED, size=32, color=TEXT_SECONDARY),
@@ -625,6 +540,7 @@ import flet as ft
                     on_click=lambda e: set_order_type('limit'),
                 )),
                 ft.Container(width=15),
+                # Стоп-лимит
                 (stop_btn := ft.Container(
                     content=ft.Column([
                         ft.Icon(ft.icons.SHIELD_ROUNDED, size=32, color=TEXT_SECONDARY),
@@ -642,10 +558,236 @@ import flet as ft
                     on_click=lambda e: set_order_type('stop-limit'),
                 )),
             ]),
+        ]),
+        padding=25,
+        bgcolor=CARD_BG,
         border_radius=12,
         border=ft.border.all(1, BORDER_COLOR),
     )
     
+    # ==================== ФОРМА ВВОДА ====================
+    input_sync_in_progress = False
+    last_edited_field = "quantity"
+
+    def parse_numeric(value):
+        try:
+            raw = str(value or "0").replace("$", "").replace(" ", "")
+            if "," in raw and "." in raw:
+                raw = raw.replace(",", "")
+            elif "," in raw:
+                raw = raw.replace(",", ".")
+            return float(raw or 0)
+        except:
+            return 0.0
+
+    def get_effective_price():
+        if order_type in ("limit", "stop-limit") and price_field.value:
+            return parse_numeric(price_field.value)
+        return parse_numeric(price_value.value)
+
+    def update_summary():
+        try:
+            qty = parse_numeric(quantity_field.value)
+            price = get_effective_price()
+            total = qty * price
+            commission = abs(total) * 0.001
+            qty_summary.value = f"{qty:.6f} {coin_name}"
+            price_summary.value = f"${price:,.2f}"
+            commission_summary.value = f"${commission:,.2f}"
+            total_summary.value = f"${(total + commission if buy_active else total - commission):,.2f}"
+            total_equiv.value = f"≈ ${total:,.2f}"
+        except:
+            qty_summary.value = f"0.000000 {coin_name}"
+            price_summary.value = "$0.00"
+            commission_summary.value = "$0.00"
+            total_summary.value = "$0.00"
+            total_equiv.value = "≈ $0.00"
+        page.update()
+
+    def sync_from_quantity():
+        nonlocal input_sync_in_progress
+        if input_sync_in_progress:
+            return
+        input_sync_in_progress = True
+        try:
+            qty = parse_numeric(quantity_field.value)
+            price = get_effective_price()
+            amount_field.value = f"{qty * price:.2f}" if price > 0 else "0.00"
+            update_summary()
+        finally:
+            input_sync_in_progress = False
+
+    def sync_from_amount():
+        nonlocal input_sync_in_progress
+        if input_sync_in_progress:
+            return
+        input_sync_in_progress = True
+        try:
+            amount = parse_numeric(amount_field.value)
+            price = get_effective_price()
+            quantity_field.value = f"{(amount / price):.6f}" if price > 0 else "0.000000"
+            update_summary()
+        finally:
+            input_sync_in_progress = False
+
+    def recalculate_inputs():
+        if last_edited_field == "amount":
+            sync_from_amount()
+        else:
+            sync_from_quantity()
+
+    def quantity_changed(e):
+        nonlocal last_edited_field
+        last_edited_field = "quantity"
+        clear_percent_highlight()
+        sync_from_quantity()
+
+    def amount_changed(e):
+        nonlocal last_edited_field
+        last_edited_field = "amount"
+        clear_percent_highlight()
+        sync_from_amount()
+
+    quantity_field = ft.TextField(
+        value="0.001",
+        expand=True,
+        height=60,
+        bgcolor=INPUT_BG,
+        border_color=BORDER_COLOR,
+        focused_border_color=PRIMARY_COLOR,
+        text_size=20,
+        text_align="right",
+        suffix_text=coin_name,
+        content_padding=ft.padding.symmetric(horizontal=20, vertical=15),
+        on_change=quantity_changed,
+    )
+
+    amount_field = ft.TextField(
+        value="0.00",
+        expand=True,
+        height=60,
+        bgcolor=INPUT_BG,
+        border_color=BORDER_COLOR,
+        focused_border_color=PRIMARY_COLOR,
+        text_size=20,
+        text_align="right",
+        suffix_text="USDT",
+        content_padding=ft.padding.symmetric(horizontal=20, vertical=15),
+        on_change=amount_changed,
+    )
+
+    # поля цены для лимитных ордеров
+    price_field = ft.TextField(
+        value="",
+        hint_text="Цена",
+        expand=True,
+        height=50,
+        visible=False,
+        bgcolor=INPUT_BG,
+        border_color=BORDER_COLOR,
+        focused_border_color=PRIMARY_COLOR,
+        text_size=16,
+        text_align="right",
+        content_padding=ft.padding.symmetric(horizontal=12, vertical=12),
+        on_change=lambda e: recalculate_inputs(),
+    )
+
+    stop_price_field = ft.TextField(
+        value="",
+        hint_text="Стоп-цена",
+        expand=True,
+        height=50,
+        visible=False,
+        bgcolor=INPUT_BG,
+        border_color=BORDER_COLOR,
+        focused_border_color=PRIMARY_COLOR,
+        text_size=16,
+        text_align="right",
+        content_padding=ft.padding.symmetric(horizontal=12, vertical=12),
+        on_change=lambda e: recalculate_inputs(),
+    )
+
+    # ==================== КНОПКИ БЫСТРОГО ВЫБОРА ПРОЦЕНТА ====================
+    pct25_btn = ft.Container(
+        content=ft.Text("25%", size=12, weight="bold", color=TEXT_SECONDARY),
+        expand=True,
+        height=40,
+        bgcolor=INPUT_BG,
+        border_radius=8,
+        border=ft.border.all(1, BORDER_COLOR),
+        alignment=ft.alignment.center,
+        ink=True,
+        on_click=lambda e: percent_select(0.25),
+    )
+    pct50_btn = ft.Container(
+        content=ft.Text("50%", size=12, weight="bold", color=TEXT_SECONDARY),
+        expand=True,
+        height=40,
+        bgcolor=INPUT_BG,
+        border_radius=8,
+        border=ft.border.all(1, BORDER_COLOR),
+        alignment=ft.alignment.center,
+        ink=True,
+        on_click=lambda e: percent_select(0.5),
+    )
+    pct75_btn = ft.Container(
+        content=ft.Text("75%", size=12, weight="bold", color=TEXT_SECONDARY),
+        expand=True,
+        height=40,
+        bgcolor=INPUT_BG,
+        border_radius=8,
+        border=ft.border.all(1, BORDER_COLOR),
+        alignment=ft.alignment.center,
+        ink=True,
+        on_click=lambda e: percent_select(0.75),
+    )
+    pctMax_btn = ft.Container(
+        content=ft.Text("MAX", size=12, weight="bold", color=PRIMARY_COLOR),
+        expand=True,
+        height=40,
+        bgcolor=ft.colors.with_opacity(0.15, PRIMARY_COLOR),
+        border_radius=8,
+        border=ft.border.all(1, BORDER_COLOR),
+        alignment=ft.alignment.center,
+        ink=True,
+        on_click=lambda e: percent_select(1.0),
+    )
+
+    input_form = ft.Container(
+        content=ft.Column([
+            # Количество
+            ft.Row([
+                ft.Text("КОЛИЧЕСТВО", size=11, color=TEXT_SECONDARY, weight="bold"),
+                ft.Container(expand=True),
+                ft.Text("Доступно: ", size=12, color=TEXT_SECONDARY),
+                available_text,
+            ]),
+            # кнопки быстрого выбора процента
+            ft.Row([
+                pct25_btn,
+                pct50_btn,
+                pct75_btn,
+                pctMax_btn,
+            ], spacing=8),
+            ft.Container(height=10),
+            quantity_field,
+            ft.Container(height=15),
+            ft.Row([
+                ft.Text("СУММА", size=11, color=TEXT_SECONDARY, weight="bold"),
+                ft.Container(expand=True),
+                ft.Text("Ручной ввод суммы", size=12, color=TEXT_SECONDARY),
+            ]),
+            amount_field,
+            ft.Container(height=15),
+            price_field,
+            stop_price_field,
+        ]),
+        padding=25,
+        bgcolor=CARD_BG,
+        border_radius=12,
+        border=ft.border.all(1, BORDER_COLOR),
+    )
+
     # ==================== ИТОГОВЫЙ РАСЧЁТ ====================
     # динамические поля в сводке
     qty_summary = ft.Text("0.000 BTC", size=14, color=TEXT_PRIMARY, weight="bold")
@@ -653,29 +795,6 @@ import flet as ft
     commission_summary = ft.Text("$0.00", size=14, color=WARNING_COLOR, weight="bold")
     total_summary = ft.Text("$0.00", size=36, color=action_color, weight="bold")
     total_equiv = ft.Text("≈ 0.000 BTC", size=13, color=TEXT_SECONDARY)
-
-    def update_summary():
-        try:
-            qty = float(quantity_field.value or 0)
-        except:
-            qty = 0.0
-        price = 0.0
-        try:
-            # выбираем цену в зависимости от типа ордера
-            if order_type in ('limit', 'stop-limit') and price_field.value:
-                price = float(price_field.value.replace(',','') or 0)
-            else:
-                price = float(price_value.value.replace('$','').replace(',','') or 0)
-        except:
-            price = 0.0
-        total = qty * price
-        commission = abs(total) * 0.001
-        qty_summary.value = f"{qty:.6f} {coin_name}"
-        price_summary.value = f"${price:,.2f}"
-        commission_summary.value = f"${commission:,.2f}"
-        total_summary.value = f"${(total + commission if buy_active else total - commission):,.2f}"
-        total_equiv.value = f"≈ {qty:.6f} {coin_name}"
-        page.update()
 
     def set_order_type(new_type: str):
         nonlocal order_type
@@ -711,29 +830,30 @@ import flet as ft
             pass
         # обновляем UI
         update_action_button()
-        update_summary()
+        recalculate_inputs()
         page.update()
 
     def percent_select(pct: float):
+        nonlocal last_edited_field
         try:
+            price = get_effective_price()
             if side_selector_value == 'sell':
                 bal = query_balance(current_exchange, coin_name)
                 avail = float(bal.get('free') or 0) if bal else 0.0
                 amount = avail * pct
+                quantity_field.value = f"{amount:.6f}"
+                amount_field.value = f"{amount * price:.2f}" if price > 0 else "0.00"
+                last_edited_field = "quantity"
             else:
                 bal = query_balance(current_exchange, 'USDT')
                 avail = float(bal.get('free') or 0) if bal else 0.0
-                # используем текущую цену для расчёта количества монет
-                try:
-                    price = float(price_value.value.replace('$','').replace(',','') or 0)
-                except:
-                    succ, curr = get_current_price(current_exchange, current_symbol, "", "")
-                    price = curr.get('last', 0) if succ else 0
                 if not price or price == 0:
                     show_status("Не удалось получить цену для расчёта", "error")
                     return
-                amount = (avail or 0) * pct / price
-            quantity_field.value = f"{amount:.6f}"
+                total_amount = (avail or 0) * pct
+                amount_field.value = f"{total_amount:.2f}"
+                quantity_field.value = f"{(total_amount / price):.6f}"
+                last_edited_field = "amount"
         except Exception as e:
             logger.error(f"[TRADING] Ошибка расчёта процента: {e}")
         # подсветим выбранную кнопку процента

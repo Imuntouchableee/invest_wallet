@@ -5,6 +5,7 @@
 # ============ ЦВЕТОВАЯ СХЕМА ============
 DARK_BG = "#0a0a0f"
 CARD_BG = "#12121a"
+INPUT_BG = "#1a1a24"
 PRIMARY_COLOR = "#00d4ff"
 SECONDARY_COLOR = "#00ff88"
 ACCENT_COLOR = "#ff3366"
