@@ -1,6 +1,6 @@
 """Работа с базой данных PostgreSQL"""
 import psycopg2
-from psycopg2.extras import execute_values
+from psycopg2.extras import Json, execute_values
 # импортируем конфиг из пакета data
 from data.config import DATABASE
 
@@ -52,8 +52,10 @@ class DatabaseManager:
                     taker_fee DECIMAL(10, 6),
                     min_order_amount DECIMAL(20, 8),
                     lot_size DECIMAL(20, 8),
-                    ask_price DECIMAL(20, 8),
-                    ask_volume DECIMAL(20, 8),
+                    ask_price JSONB,
+                    ask_volume JSONB,
+                    bid_price JSONB,
+                    bid_volume JSONB,
                     quotes_1h TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -75,8 +77,10 @@ class DatabaseManager:
                     taker_fee DECIMAL(10, 6),
                     min_order_amount DECIMAL(20, 8),
                     lot_size DECIMAL(20, 8),
-                    ask_price DECIMAL(20, 8),
-                    ask_volume DECIMAL(20, 8),
+                    ask_price JSONB,
+                    ask_volume JSONB,
+                    bid_price JSONB,
+                    bid_volume JSONB,
                     quotes_1h TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -95,8 +99,10 @@ class DatabaseManager:
                     low_24h DECIMAL(20, 8),
                     volume_24h DECIMAL(20, 2),
                     maker_fee DECIMAL(10, 6),
-                    ask_price DECIMAL(20, 8),
-                    ask_volume DECIMAL(20, 8),
+                    ask_price JSONB,
+                    ask_volume JSONB,
+                    bid_price JSONB,
+                    bid_volume JSONB,
                     quotes_1h TEXT,
                     taker_fee DECIMAL(10, 6),
                     min_order_amount DECIMAL(20, 8),
@@ -105,6 +111,10 @@ class DatabaseManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            self._ensure_pairs_schema('mexc_pairs')
+            self._ensure_pairs_schema('bybit_pairs')
+            self._ensure_pairs_schema('gateio_pairs')
             
             # Таблица для баланса MEXC
             self.cursor.execute("""
@@ -148,6 +158,34 @@ class DatabaseManager:
         except Exception as e:
             print(f"✗ Ошибка создания таблиц: {e}")
             return False
+
+    def _ensure_pairs_schema(self, table_name):
+        """Приводит схему таблиц пар к актуальному виду."""
+        jsonb_columns = ('ask_price', 'ask_volume', 'bid_price', 'bid_volume')
+
+        for column_name in jsonb_columns:
+            self.cursor.execute(
+                f"ALTER TABLE {table_name} "
+                f"ADD COLUMN IF NOT EXISTS {column_name} JSONB"
+            )
+
+        for column_name in ('ask_price', 'ask_volume'):
+            self.cursor.execute(
+                f"ALTER TABLE {table_name} "
+                f"ALTER COLUMN {column_name} TYPE JSONB "
+                f"USING CASE "
+                f"WHEN {column_name} IS NULL THEN '[]'::jsonb "
+                f"WHEN jsonb_typeof(to_jsonb({column_name})) = 'number' "
+                f"THEN jsonb_build_array({column_name}) "
+                f"ELSE to_jsonb({column_name}) END"
+            )
+
+        for column_name in ('bid_price', 'bid_volume'):
+            self.cursor.execute(
+                f"UPDATE {table_name} "
+                f"SET {column_name} = '[]'::jsonb "
+                f"WHERE {column_name} IS NULL"
+            )
     
     def save_pairs(self, exchange, pairs_data):
         """Сохранение данных по парам в БД"""
@@ -169,8 +207,10 @@ class DatabaseManager:
                     data.get('taker_fee'),
                     data.get('min_order_amount'),
                     data.get('lot_size'),
-                    data.get('ask_price'),
-                    data.get('ask_volume'),
+                    Json(data.get('ask_price') or []),
+                    Json(data.get('ask_volume') or []),
+                    Json(data.get('bid_price') or []),
+                    Json(data.get('bid_volume') or []),
                     data.get('quotes_1h'),
                 ))
             
@@ -181,7 +221,8 @@ class DatabaseManager:
                     INSERT INTO {table_name} 
                     (symbol, current_price, change_24h_percent, change_24h_absolute,
                      high_24h, low_24h, volume_24h, maker_fee, taker_fee, 
-                     min_order_amount, lot_size, ask_price, ask_volume, quotes_1h)
+                     min_order_amount, lot_size, ask_price, ask_volume,
+                     bid_price, bid_volume, quotes_1h)
                     VALUES %s
                     ON CONFLICT (symbol) DO UPDATE SET
                         current_price = EXCLUDED.current_price,
@@ -196,6 +237,8 @@ class DatabaseManager:
                         lot_size = EXCLUDED.lot_size,
                         ask_price = EXCLUDED.ask_price,
                         ask_volume = EXCLUDED.ask_volume,
+                        bid_price = EXCLUDED.bid_price,
+                        bid_volume = EXCLUDED.bid_volume,
                         quotes_1h = EXCLUDED.quotes_1h,
                         updated_at = CURRENT_TIMESTAMP
                     """,

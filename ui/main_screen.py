@@ -12,6 +12,7 @@ from ui.config import (
     EXCHANGE_COLORS, EXCHANGE_NAMES,
 )
 from ui.components import get_user_level
+from ui.slippage import show_slippage_analysis_dialog
 from backend.models import ExchangeAPIKey, session
 from backend.api import fetch_user_portfolio
 
@@ -30,6 +31,17 @@ def _make_trade_handler(show_trading_callback, asset=None, exchange_name=None,
             exchange_name=exchange_name,
             side=side,
         )
+
+    return handler
+
+
+def _make_slippage_handler(page, asset=None):
+    """Открывает окно анализа проскальзывания для выбранного актива."""
+
+    frozen_asset = dict(asset) if isinstance(asset, dict) else asset
+
+    def handler(e):
+        show_slippage_analysis_dialog(page, frozen_asset)
 
     return handler
 
@@ -248,6 +260,21 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                             # Кнопки покупки/продажи
                             ft.Row([
                                 ft.Container(
+                                    content=ft.Icon(
+                                        ft.icons.SHOW_CHART,
+                                        size=18,
+                                        color=PRIMARY_COLOR,
+                                    ),
+                                    width=36,
+                                    height=36,
+                                    border_radius=8,
+                                    bgcolor=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
+                                    alignment=ft.alignment.center,
+                                    on_click=_make_slippage_handler(page, asset),
+                                    ink=True,
+                                    tooltip="Анализ проскальзывания",
+                                ),
+                                ft.Container(
                                     content=ft.Icon(ft.icons.ARROW_DOWNWARD, size=18, color=DARK_BG),
                                     width=36, height=36,
                                     border_radius=8,
@@ -434,6 +461,21 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                     ], spacing=2, horizontal_alignment="end"),
                     # Кнопки покупки/продажи
                     ft.Row([
+                        ft.Container(
+                            content=ft.Icon(
+                                ft.icons.SHOW_CHART,
+                                size=18,
+                                color=PRIMARY_COLOR,
+                            ),
+                            width=36,
+                            height=36,
+                            border_radius=8,
+                            bgcolor=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
+                            alignment=ft.alignment.center,
+                            on_click=_make_slippage_handler(page, asset),
+                            ink=True,
+                            tooltip="Анализ проскальзывания",
+                        ),
                         ft.Container(
                             content=ft.Icon(ft.icons.ARROW_DOWNWARD, size=18, color=DARK_BG),
                             width=36, height=36,

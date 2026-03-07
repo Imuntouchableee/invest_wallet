@@ -45,18 +45,25 @@ class BybitExchange:
             return set()
     
     def get_order_book_data(self, symbol):
-        """Получить данные из стакана (ask) для символа"""
+        """Получить первые 5 уровней стакана для символа."""
         try:
-            orderbook = self.ccxt_exchange.fetch_order_book(symbol, limit=1)
-            if orderbook['asks'] and len(orderbook['asks']) > 0:
-                ask = orderbook['asks'][0]
-                return {
-                    'ask_price': ask[0],
-                    'ask_volume': ask[1],
-                }
+            orderbook = self.ccxt_exchange.fetch_order_book(symbol, limit=5)
+            asks = orderbook.get('asks') or []
+            bids = orderbook.get('bids') or []
+            return {
+                'ask_price': [level[0] for level in asks[:5]],
+                'ask_volume': [level[1] for level in asks[:5]],
+                'bid_price': [level[0] for level in bids[:5]],
+                'bid_volume': [level[1] for level in bids[:5]],
+            }
         except Exception:
             pass
-        return {'ask_price': None, 'ask_volume': None}
+        return {
+            'ask_price': [],
+            'ask_volume': [],
+            'bid_price': [],
+            'bid_volume': [],
+        }
     
     def get_quotes_1h(self, symbol):
         """Получить котировки за последний час (12 свечей по 5 минут)"""
@@ -138,6 +145,8 @@ class BybitExchange:
                         'lot_size': market.get('precision', {}).get('amount', 0),
                         'ask_price': orderbook_data['ask_price'],
                         'ask_volume': orderbook_data['ask_volume'],
+                        'bid_price': orderbook_data['bid_price'],
+                        'bid_volume': orderbook_data['bid_volume'],
                         'quotes_1h': quotes,
                     }
                     print("✓")
