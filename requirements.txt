@@ -1,0 +1,15 @@
+alembic==1.14.0
+catboost==1.2.7
+ccxt==4.4.41
+flet==0.24.1
+greenlet==3.0.3
+joblib==1.4.2
+lightgbm==4.5.0
+matplotlib==3.9.2
+numpy==1.26.4
+optuna==4.1.0
+pandas==2.2.3
+psycopg2-binary==2.9.10
+scikit-learn==1.5.2
+SQLAlchemy==2.0.36
+xgboost==2.1.2
