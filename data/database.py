@@ -1,5 +1,6 @@
 """Работа с базой данных PostgreSQL"""
 import psycopg2
+import pandas as pd
 from psycopg2.extras import Json, execute_values
 # импортируем конфиг из пакета data
 from data.config import DATABASE
@@ -151,6 +152,21 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Таблица исторических OHLCV-свечей для ML-прогнозирования
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS price_history (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(100) NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    open DECIMAL(20, 8),
+                    high DECIMAL(20, 8),
+                    low DECIMAL(20, 8),
+                    close DECIMAL(20, 8),
+                    volume DECIMAL(30, 8),
+                    UNIQUE(symbol, timestamp)
+                )
+            """)
             
             self.conn.commit()
             print("✓ Таблицы созданы/проверены")
@@ -280,3 +296,64 @@ class DatabaseManager:
                 print(f"✓ {len(balance_data)} активов сохранено")
         except Exception as e:
             print(f"✗ Ошибка сохранения: {e}")
+
+    def save_price_history(self, symbol, df):
+        """Сохранение OHLCV-данных в таблицу price_history."""
+        try:
+            values = []
+            for _, row in df.iterrows():
+                values.append((
+                    symbol,
+                    row['Date'],
+                    float(row['Open']),
+                    float(row['High']),
+                    float(row['Low']),
+                    float(row['Close']),
+                    float(row['Volume']),
+                ))
+
+            if values:
+                execute_values(
+                    self.cursor,
+                    """
+                    INSERT INTO price_history
+                        (symbol, timestamp, open, high, low, close, volume)
+                    VALUES %s
+                    ON CONFLICT (symbol, timestamp) DO UPDATE SET
+                        open   = EXCLUDED.open,
+                        high   = EXCLUDED.high,
+                        low    = EXCLUDED.low,
+                        close  = EXCLUDED.close,
+                        volume = EXCLUDED.volume
+                    """,
+                    values,
+                )
+                self.conn.commit()
+                print(f"✓ price_history: {len(values)} свечей для {symbol}")
+        except Exception as e:
+            print(f"✗ Ошибка сохранения price_history: {e}")
+
+    def load_price_history(self, symbol):
+        """Загрузка OHLCV-данных из таблицы price_history."""
+        try:
+            self.cursor.execute(
+                """
+                SELECT timestamp, open, high, low, close, volume
+                FROM price_history
+                WHERE symbol = %s
+                ORDER BY timestamp ASC
+                """,
+                (symbol,),
+            )
+            rows = self.cursor.fetchall()
+            if not rows:
+                return pd.DataFrame()
+
+            df = pd.DataFrame(
+                rows,
+                columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'],
+            )
+            return df
+        except Exception as e:
+            print(f"✗ Ошибка чтения price_history: {e}")
+            return pd.DataFrame()

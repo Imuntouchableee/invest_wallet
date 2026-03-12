@@ -1,3 +1,5 @@
+import threading
+
 import flet as ft
 from logging import getLogger
 
@@ -17,6 +19,10 @@ from ui.config import (
 )
 
 logger = getLogger(__name__)
+
+AI_GRADIENT_UP = "#00ff88"
+AI_GRADIENT_DOWN = "#ff3366"
+AI_PANEL_BG = "#0d1117"
 
 EXCHANGE_TABLES = {
     'mexc': 'mexc_pairs',
@@ -389,6 +395,211 @@ def _build_result_card(asset_name, exchange_name, side, result, book, is_best):
     )
 
 
+def _build_prediction_loading():
+    """Панель загрузки прогноза."""
+    return ft.Container(
+        padding=24,
+        bgcolor=AI_PANEL_BG,
+        border_radius=18,
+        border=ft.border.all(1, ft.colors.with_opacity(0.2, PRIMARY_COLOR)),
+        content=ft.Row([
+            ft.ProgressRing(
+                width=28, height=28, stroke_width=3, color=PRIMARY_COLOR,
+            ),
+            ft.Container(width=14),
+            ft.Column([
+                ft.Text(
+                    'ПРОГНОЗ ИИ',
+                    size=14, weight='bold', color=PRIMARY_COLOR,
+                ),
+                ft.Text(
+                    'Анализ дневных свечей и обучение модели...',
+                    size=12, color=TEXT_SECONDARY,
+                ),
+            ], spacing=4),
+        ], vertical_alignment='center'),
+    )
+
+
+def _build_prediction_error(error_message):
+    """Панель ошибки прогноза."""
+    return ft.Container(
+        padding=24,
+        bgcolor=AI_PANEL_BG,
+        border_radius=18,
+        border=ft.border.all(1, ft.colors.with_opacity(0.2, ACCENT_COLOR)),
+        content=ft.Row([
+            ft.Container(
+                width=44, height=44, border_radius=22,
+                bgcolor=ft.colors.with_opacity(0.12, ACCENT_COLOR),
+                alignment=ft.alignment.center,
+                content=ft.Icon(
+                    ft.icons.ERROR_OUTLINE_ROUNDED, color=ACCENT_COLOR, size=24,
+                ),
+            ),
+            ft.Container(width=14),
+            ft.Column([
+                ft.Text(
+                    'ПРОГНОЗ ИИ', size=14, weight='bold', color=ACCENT_COLOR,
+                ),
+                ft.Text(error_message, size=12, color=TEXT_SECONDARY),
+            ], spacing=4, expand=True),
+        ], vertical_alignment='center'),
+    )
+
+
+def _build_prediction_result(prediction):
+    """Панель с результатом прогноза — красивый дизайн."""
+    prob_up = prediction.get('prob_up', 50.0)
+    prob_down = prediction.get('prob_down', 50.0)
+    signal = prediction.get('signal', 'up')
+    confidence = prediction.get('confidence', 50.0)
+
+    is_up = signal == 'up'
+    signal_color = AI_GRADIENT_UP if is_up else AI_GRADIENT_DOWN
+    signal_icon = ft.icons.TRENDING_UP_ROUNDED if is_up else ft.icons.TRENDING_DOWN_ROUNDED
+    signal_text = 'РОСТ' if is_up else 'ПАДЕНИЕ'
+    signal_desc = (
+        'Модель прогнозирует рост цены' if is_up
+        else 'Модель прогнозирует снижение цены'
+    )
+
+    return ft.Container(
+        padding=24,
+        bgcolor=AI_PANEL_BG,
+        border_radius=18,
+        border=ft.border.all(1, ft.colors.with_opacity(0.25, signal_color)),
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=24,
+            color=ft.colors.with_opacity(0.10, signal_color),
+        ),
+        content=ft.Row([
+            # Левая часть: крупный индикатор сигнала
+            ft.Container(
+                width=82, height=82, border_radius=41,
+                bgcolor=ft.colors.with_opacity(0.12, signal_color),
+                border=ft.border.all(3, ft.colors.with_opacity(0.45, signal_color)),
+                alignment=ft.alignment.center,
+                content=ft.Icon(signal_icon, size=42, color=signal_color),
+            ),
+            ft.Container(width=22),
+            # Центральная часть: бары вероятностей
+            ft.Column([
+                ft.Row([
+                    ft.Text(
+                        'ПРОГНОЗ ИИ',
+                        size=11, weight='bold', color=PRIMARY_COLOR,
+                    ),
+                    ft.Container(
+                        padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                        bgcolor=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
+                        border_radius=6,
+                        content=ft.Text(
+                            'XGBoost', size=10, weight='bold', color=PRIMARY_COLOR,
+                        ),
+                    ),
+                ], spacing=10),
+                ft.Container(height=10),
+                # Бар роста
+                ft.Row([
+                    ft.Icon(
+                        ft.icons.ARROW_UPWARD_ROUNDED, size=18, color=AI_GRADIENT_UP,
+                    ),
+                    ft.Text(
+                        'Рост', size=13, color=TEXT_SECONDARY, width=55,
+                    ),
+                    ft.Container(
+                        expand=True, height=12, border_radius=6,
+                        bgcolor=ft.colors.with_opacity(0.06, AI_GRADIENT_UP),
+                        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                        content=ft.Container(
+                            width=max(prob_up * 3.5, 2),
+                            height=12,
+                            border_radius=6,
+                            bgcolor=AI_GRADIENT_UP,
+                        ),
+                        alignment=ft.alignment.center_left,
+                    ),
+                    ft.Text(
+                        f'{prob_up:.1f}%', size=16, weight='bold',
+                        color=AI_GRADIENT_UP, width=68, text_align='right',
+                    ),
+                ], spacing=8, vertical_alignment='center'),
+                ft.Container(height=6),
+                # Бар падения
+                ft.Row([
+                    ft.Icon(
+                        ft.icons.ARROW_DOWNWARD_ROUNDED, size=18, color=AI_GRADIENT_DOWN,
+                    ),
+                    ft.Text(
+                        'Падение', size=13, color=TEXT_SECONDARY, width=55,
+                    ),
+                    ft.Container(
+                        expand=True, height=12, border_radius=6,
+                        bgcolor=ft.colors.with_opacity(0.06, AI_GRADIENT_DOWN),
+                        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                        content=ft.Container(
+                            width=max(prob_down * 3.5, 2),
+                            height=12,
+                            border_radius=6,
+                            bgcolor=AI_GRADIENT_DOWN,
+                        ),
+                        alignment=ft.alignment.center_left,
+                    ),
+                    ft.Text(
+                        f'{prob_down:.1f}%', size=16, weight='bold',
+                        color=AI_GRADIENT_DOWN, width=68, text_align='right',
+                    ),
+                ], spacing=8, vertical_alignment='center'),
+            ], expand=True, spacing=0),
+            ft.Container(width=22),
+            # Правая часть: сводка сигнала
+            ft.Container(
+                width=190,
+                padding=ft.padding.symmetric(horizontal=18, vertical=14),
+                bgcolor=ft.colors.with_opacity(0.08, signal_color),
+                border_radius=16,
+                border=ft.border.all(1, ft.colors.with_opacity(0.15, signal_color)),
+                content=ft.Column([
+                    ft.Text(
+                        'Сигнал', size=11, color=TEXT_SECONDARY,
+                    ),
+                    ft.Text(
+                        signal_text, size=22, weight='bold', color=signal_color,
+                    ),
+                    ft.Container(height=6),
+                    ft.Row([
+                        ft.Text(
+                            'Уверенность', size=11, color=TEXT_SECONDARY,
+                        ),
+                        ft.Container(expand=True),
+                        ft.Text(
+                            f'{confidence:.1f}%', size=13, weight='bold',
+                            color=TEXT_PRIMARY,
+                        ),
+                    ]),
+                    ft.ProgressBar(
+                        value=confidence / 100,
+                        height=6,
+                        color=signal_color,
+                        bgcolor=ft.colors.with_opacity(0.08, signal_color),
+                        border_radius=6,
+                    ),
+                    ft.Container(height=6),
+                    ft.Text(
+                        signal_desc, size=10, color=TEXT_SECONDARY, italic=True,
+                    ),
+                    ft.Text(
+                        '23 техн. индикатора • дневные свечи',
+                        size=9, color=ft.colors.with_opacity(0.5, TEXT_SECONDARY),
+                    ),
+                ], spacing=2, horizontal_alignment='center'),
+            ),
+        ], vertical_alignment='center'),
+    )
+
+
 def show_slippage_analysis_dialog(page: ft.Page, asset: dict):
     asset_name = (asset or {}).get('currency', '').upper()
     if not asset_name or asset_name in STABLE_ASSETS:
@@ -430,6 +641,30 @@ def show_slippage_analysis_dialog(page: ft.Page, asset: dict):
     recommendation_title = ft.Text('', size=22, weight='bold', color=TEXT_PRIMARY)
     recommendation_subtitle = ft.Text('', size=13, color=TEXT_SECONDARY)
     status_text = ft.Text('', size=12, color=WARNING_COLOR, visible=False)
+
+    # Контейнер для прогноза ИИ (заполняется асинхронно)
+    prediction_container = ft.Container(content=_build_prediction_loading())
+
+    def _run_prediction():
+        """Запуск ML-прогноза в фоновом потоке."""
+        try:
+            from ml.predictor import predict_direction
+            result = predict_direction(symbol)
+            if result.get('status') == 'ok':
+                prediction_container.content = _build_prediction_result(result)
+            else:
+                prediction_container.content = _build_prediction_error(
+                    result.get('error', 'Неизвестная ошибка'),
+                )
+        except Exception as exc:
+            logger.error('[PREDICTION] %s', exc)
+            prediction_container.content = _build_prediction_error(str(exc))
+        try:
+            page.update()
+        except Exception:
+            pass
+
+    threading.Thread(target=_run_prediction, daemon=True).start()
 
     def close_dialog():
         dialog.open = False
@@ -575,7 +810,7 @@ def show_slippage_analysis_dialog(page: ft.Page, asset: dict):
         title=None,
         content=ft.Container(
             width=1160,
-            height=860,
+            height=980,
             bgcolor=DARK_BG,
             border_radius=20,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
@@ -596,9 +831,9 @@ def show_slippage_analysis_dialog(page: ft.Page, asset: dict):
                             ),
                             ft.Container(width=14),
                             ft.Column([
-                                ft.Text('АНАЛИЗ ПРОСКАЛЬЗЫВАНИЯ', size=24, weight='bold', color=TEXT_PRIMARY),
+                                ft.Text('АНАЛИЗ ПРОСКАЛЬЗЫВАНИЯ И ПРОГНОЗ', size=24, weight='bold', color=TEXT_PRIMARY),
                                 ft.Text(
-                                    f'{symbol} • сравнение глубины стакана по трем биржам',
+                                    f'{symbol} • XGBoost + стакан заявок по трём биржам',
                                     size=13,
                                     color=TEXT_SECONDARY,
                                 ),
@@ -665,7 +900,9 @@ def show_slippage_analysis_dialog(page: ft.Page, asset: dict):
                                 ], spacing=0),
                             ),
                         ]),
-                        ft.Container(height=20),
+                        ft.Container(height=16),
+                        prediction_container,
+                        ft.Container(height=16),
                         ft.Row([
                             ft.Text('Сравнение исполнения', size=18, weight='bold', color=TEXT_PRIMARY),
                             ft.Container(expand=True),
