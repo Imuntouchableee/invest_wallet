@@ -15,6 +15,11 @@ from ui.components import get_user_level
 from ui.slippage import show_slippage_analysis_dialog
 from backend.models import ExchangeAPIKey, session
 from backend.api import fetch_user_portfolio
+from backend.decision_quality_analyzer import (
+    format_exchange_name,
+    get_user_decision_quality_summary,
+)
+from backend.stress_sell_analyzer import analyze_portfolio_stress_sell
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +94,7 @@ def show_no_exchanges_screen(page: ft.Page, show_add_exchange_callback, logout_c
 def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                      show_login_callback, show_profile_callback, show_trading_callback,
                      show_logout_confirm_callback, show_exchange_settings_callback,
-                     show_no_exchanges_callback):
+                     show_no_exchanges_callback, show_assets_page_callback):
     """Главный экран с портфелем"""
     user = current_user["user"]
     if not user:
@@ -166,6 +171,69 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
         color=TEXT_PRIMARY,
         weight="bold",
     )
+    stress_nominal_text = ft.Text(
+        "$0.00",
+        size=20,
+        weight="bold",
+        color=TEXT_PRIMARY,
+    )
+    stress_executable_text = ft.Text(
+        "$0.00",
+        size=20,
+        weight="bold",
+        color=TEXT_PRIMARY,
+    )
+    stress_loss_text = ft.Text(
+        "$0.00",
+        size=20,
+        weight="bold",
+        color=ACCENT_COLOR,
+    )
+    stress_best_exit_text = ft.Text(
+        "Нет данных",
+        size=18,
+        weight="bold",
+        color=TEXT_PRIMARY,
+    )
+    stress_top_loss_text = ft.Text(
+        "Источник потерь появится после расчета",
+        size=11,
+        color=TEXT_SECONDARY,
+    )
+    stress_loss_hint_text = ft.Text(
+        "Потери на ликвидации: 0.00%",
+        size=11,
+        color=TEXT_SECONDARY,
+    )
+    decision_quality_text = ft.Text(
+        "0%",
+        size=20,
+        weight="bold",
+        color=TEXT_PRIMARY,
+    )
+    decision_loss_text = ft.Text(
+        "$0.00",
+        size=20,
+        weight="bold",
+        color=ACCENT_COLOR,
+    )
+    decision_worst_exchange_text = ft.Text(
+        "Нет данных",
+        size=18,
+        weight="bold",
+        color=TEXT_PRIMARY,
+    )
+    decision_best_exchange_text = ft.Text(
+        "Нет данных",
+        size=18,
+        weight="bold",
+        color=TEXT_PRIMARY,
+    )
+    decision_hint_text = ft.Text(
+        "История решений появится после сделок",
+        size=11,
+        color=TEXT_SECONDARY,
+    )
     sync_status_text = ft.Text(
         "Синхронизация активна",
         size=9,
@@ -211,6 +279,38 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
             bgcolor=ft.colors.with_opacity(0.18, "#0b1119"),
             border=ft.border.all(1, ft.colors.with_opacity(0.44, BORDER_COLOR)),
             expand=True,
+        )
+
+    def create_stress_metric(title: str, value_control, subtitle: ft.Text, accent_color: str):
+        return ft.Container(
+            expand=True,
+            padding=ft.padding.symmetric(horizontal=16, vertical=14),
+            border_radius=16,
+            bgcolor=ft.colors.with_opacity(0.14, "#0b1118"),
+            border=ft.border.all(
+                1,
+                ft.colors.with_opacity(0.34, BORDER_COLOR),
+            ),
+            content=ft.Column([
+                ft.Row([
+                    ft.Container(
+                        width=8,
+                        height=8,
+                        border_radius=999,
+                        bgcolor=accent_color,
+                    ),
+                    ft.Text(
+                        title,
+                        size=9,
+                        weight="bold",
+                        color=TEXT_SECONDARY,
+                    ),
+                ], spacing=8),
+                ft.Container(height=8),
+                value_control,
+                ft.Container(height=4),
+                subtitle,
+            ], spacing=0),
         )
 
     header_divider = ft.Container(
@@ -311,6 +411,321 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
         ),
     )
 
+    stress_nominal_hint = ft.Text(
+        "оценка по текущим котировкам",
+        size=10,
+        color=TEXT_SECONDARY,
+    )
+    stress_executable_hint = ft.Text(
+        "что реально удастся вывести",
+        size=10,
+        color=TEXT_SECONDARY,
+    )
+    stress_loss_hint = ft.Text(
+        "съедается ликвидностью рынка",
+        size=10,
+        color=TEXT_SECONDARY,
+    )
+    stress_best_exit_hint = ft.Text(
+        "площадка с лучшим суммарным выходом",
+        size=10,
+        color=TEXT_SECONDARY,
+    )
+
+    stress_sell_panel = ft.Container(
+        margin=ft.margin.only(left=18, right=18, top=0, bottom=3),
+        padding=18,
+        border_radius=20,
+        gradient=ft.LinearGradient(
+            begin=ft.alignment.top_left,
+            end=ft.alignment.bottom_right,
+            colors=["#141922", "#0e131a", "#0c1016"],
+        ),
+        border=ft.border.all(
+            1,
+            ft.colors.with_opacity(0.56, BORDER_COLOR),
+        ),
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=16,
+            color=ft.colors.with_opacity(0.18, "#000000"),
+            offset=ft.Offset(0, 8),
+        ),
+        content=ft.Column([
+            ft.Row([
+                ft.Column([
+                    ft.Text(
+                        "СТРЕСС-ПРОДАЖА ПОРТФЕЛЯ",
+                        size=11,
+                        weight="bold",
+                        color=TEXT_SECONDARY,
+                    ),
+                    ft.Text(
+                        "Исполнимая стоимость при срочной ликвидации",
+                        size=18,
+                        weight="bold",
+                        color=TEXT_PRIMARY,
+                    ),
+                ], spacing=4),
+                ft.Container(expand=True),
+                ft.Container(
+                    padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                    border_radius=999,
+                    bgcolor=ft.colors.with_opacity(0.10, ACCENT_COLOR),
+                    border=ft.border.all(
+                        1,
+                        ft.colors.with_opacity(0.24, ACCENT_COLOR),
+                    ),
+                    content=ft.Text(
+                        "стресс-сценарий по bid-ликвидности",
+                        size=10,
+                        color=ACCENT_COLOR,
+                        weight="bold",
+                    ),
+                ),
+            ], vertical_alignment="center"),
+            ft.Container(height=16),
+            ft.Row([
+                create_stress_metric(
+                    "НА БУМАГЕ",
+                    stress_nominal_text,
+                    stress_nominal_hint,
+                    PRIMARY_COLOR,
+                ),
+                create_stress_metric(
+                    "ПРИ СРОЧНОЙ ПРОДАЖЕ",
+                    stress_executable_text,
+                    stress_executable_hint,
+                    SECONDARY_COLOR,
+                ),
+                create_stress_metric(
+                    "ПОТЕРИ НА ИСПОЛНЕНИИ",
+                    stress_loss_text,
+                    stress_loss_hint,
+                    ACCENT_COLOR,
+                ),
+                create_stress_metric(
+                    "ЛУЧШИЙ ВЫХОД",
+                    stress_best_exit_text,
+                    stress_best_exit_hint,
+                    WARNING_COLOR,
+                ),
+            ], spacing=12),
+            ft.Container(height=12),
+            ft.Container(
+                padding=ft.padding.symmetric(horizontal=14, vertical=12),
+                border_radius=16,
+                bgcolor=ft.colors.with_opacity(0.16, "#0a1117"),
+                border=ft.border.all(
+                    1,
+                    ft.colors.with_opacity(0.32, BORDER_COLOR),
+                ),
+                content=ft.Row([
+                    ft.Text(
+                        "Основной источник потерь",
+                        size=11,
+                        weight="bold",
+                        color=TEXT_SECONDARY,
+                    ),
+                    ft.Container(width=16),
+                    stress_top_loss_text,
+                    ft.Container(expand=True),
+                    stress_loss_hint_text,
+                ], vertical_alignment="center"),
+            ),
+        ], spacing=0),
+    )
+
+    decision_quality_panel = ft.Container(
+        margin=ft.margin.only(left=18, right=18, top=0, bottom=3),
+        padding=18,
+        border_radius=20,
+        gradient=ft.LinearGradient(
+            begin=ft.alignment.top_left,
+            end=ft.alignment.bottom_right,
+            colors=["#141a21", "#0d1218", "#0b0f15"],
+        ),
+        border=ft.border.all(
+            1,
+            ft.colors.with_opacity(0.52, BORDER_COLOR),
+        ),
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=16,
+            color=ft.colors.with_opacity(0.16, "#000000"),
+            offset=ft.Offset(0, 8),
+        ),
+        content=ft.Column([
+            ft.Row([
+                ft.Column([
+                    ft.Text(
+                        "КАЧЕСТВО РЕШЕНИЙ",
+                        size=11,
+                        weight="bold",
+                        color=TEXT_SECONDARY,
+                    ),
+                    ft.Text(
+                        "Самоанализ выбора площадки",
+                        size=18,
+                        weight="bold",
+                        color=TEXT_PRIMARY,
+                    ),
+                ], spacing=4),
+                ft.Container(expand=True),
+                ft.Container(
+                    padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                    border_radius=999,
+                    bgcolor=ft.colors.with_opacity(0.10, PRIMARY_COLOR),
+                    border=ft.border.all(
+                        1,
+                        ft.colors.with_opacity(0.24, PRIMARY_COLOR),
+                    ),
+                    content=ft.Text(
+                        "сравнение с лучшей альтернативой",
+                        size=10,
+                        color=PRIMARY_COLOR,
+                        weight="bold",
+                    ),
+                ),
+            ], vertical_alignment="center"),
+            ft.Container(height=16),
+            ft.Row([
+                create_stress_metric(
+                    "КАЧЕСТВО ВЫБОРА БИРЖИ",
+                    decision_quality_text,
+                    ft.Text(
+                        "средняя оценка исполнения",
+                        size=10,
+                        color=TEXT_SECONDARY,
+                    ),
+                    PRIMARY_COLOR,
+                ),
+                create_stress_metric(
+                    "ИЗБЫТОЧНЫЕ ПОТЕРИ",
+                    decision_loss_text,
+                    ft.Text(
+                        "упущено из-за неидеального выбора",
+                        size=10,
+                        color=TEXT_SECONDARY,
+                    ),
+                    ACCENT_COLOR,
+                ),
+                create_stress_metric(
+                    "ЧАЩЕ ВСЕГО ПРОБЛЕМА",
+                    decision_worst_exchange_text,
+                    ft.Text(
+                        "где чаще всего теряется качество",
+                        size=10,
+                        color=TEXT_SECONDARY,
+                    ),
+                    WARNING_COLOR,
+                ),
+                create_stress_metric(
+                    "ЛУЧШЕЕ ИСПОЛНЕНИЕ",
+                    decision_best_exchange_text,
+                    ft.Text(
+                        "где решения были сильнее всего",
+                        size=10,
+                        color=TEXT_SECONDARY,
+                    ),
+                    SECONDARY_COLOR,
+                ),
+            ], spacing=12),
+            ft.Container(height=12),
+            ft.Container(
+                padding=ft.padding.symmetric(horizontal=14, vertical=12),
+                border_radius=16,
+                bgcolor=ft.colors.with_opacity(0.14, "#0a1117"),
+                border=ft.border.all(
+                    1,
+                    ft.colors.with_opacity(0.30, BORDER_COLOR),
+                ),
+                content=decision_hint_text,
+            ),
+        ], spacing=0),
+    )
+
+    assets_gateway_panel = ft.Container(
+        margin=ft.margin.only(left=18, right=18, top=0, bottom=3),
+        padding=18,
+        border_radius=20,
+        gradient=ft.LinearGradient(
+            begin=ft.alignment.top_left,
+            end=ft.alignment.bottom_right,
+            colors=["#161c24", "#0f141b", "#0c1015"],
+        ),
+        border=ft.border.all(
+            1,
+            ft.colors.with_opacity(0.52, BORDER_COLOR),
+        ),
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=16,
+            color=ft.colors.with_opacity(0.16, "#000000"),
+            offset=ft.Offset(0, 8),
+        ),
+        content=ft.Row([
+            ft.Column([
+                ft.Text(
+                    "СОСТАВ ПОРТФЕЛЯ",
+                    size=11,
+                    weight="bold",
+                    color=TEXT_SECONDARY,
+                ),
+                ft.Text(
+                    "Все активы вынесены на отдельную страницу",
+                    size=18,
+                    weight="bold",
+                    color=TEXT_PRIMARY,
+                ),
+                ft.Text(
+                    "Откройте полный экран активов для детального просмотра, фильтрации по биржам и быстрых действий.",
+                    size=11,
+                    color=TEXT_SECONDARY,
+                ),
+            ], spacing=6, expand=True),
+            ft.Container(width=18),
+            ft.Container(
+                width=260,
+                padding=ft.padding.symmetric(horizontal=16, vertical=14),
+                border_radius=18,
+                bgcolor=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
+                border=ft.border.all(
+                    1,
+                    ft.colors.with_opacity(0.32, PRIMARY_COLOR),
+                ),
+                ink=True,
+                on_click=lambda e: show_assets_page_callback(),
+                content=ft.Row([
+                    ft.Icon(
+                        ft.icons.WALLET_ROUNDED,
+                        size=22,
+                        color=PRIMARY_COLOR,
+                    ),
+                    ft.Container(width=10),
+                    ft.Column([
+                        ft.Text(
+                            "Открыть все активы",
+                            size=15,
+                            weight="bold",
+                            color=TEXT_PRIMARY,
+                        ),
+                        ft.Text(
+                            "полноэкранный обзор портфеля",
+                            size=10,
+                            color=TEXT_SECONDARY,
+                        ),
+                    ], spacing=3, expand=True),
+                    ft.Icon(
+                        ft.icons.ARROW_FORWARD_ROUNDED,
+                        size=20,
+                        color=PRIMARY_COLOR,
+                    ),
+                ], vertical_alignment="center"),
+            ),
+        ], vertical_alignment="center"),
+    )
+
     def apply_portfolio_summary(portfolio_data: dict):
         level_name, level_color, _level_icon = get_user_level(portfolio_data['total_usd'])
         level_chip_text.value = level_name
@@ -350,6 +765,55 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
         last_update = portfolio_cache.get("timestamp") or datetime.now()
         update_time_text.value = (
             f"Обновлено: {last_update.strftime('%H:%M:%S')}"
+        )
+
+        stress_summary = analyze_portfolio_stress_sell(portfolio_data)
+        nominal_value = stress_summary.get('nominal_value', 0.0)
+        executable_value = stress_summary.get('executable_value', 0.0)
+        liquidation_loss = stress_summary.get('liquidation_loss', 0.0)
+        liquidation_loss_pct = stress_summary.get('liquidation_loss_pct', 0.0)
+        best_exit_exchange = stress_summary.get('best_exit_exchange')
+        top_loss_assets = stress_summary.get('top_loss_assets') or []
+
+        stress_nominal_text.value = f"${nominal_value:,.2f}"
+        stress_executable_text.value = f"${executable_value:,.2f}"
+        stress_loss_text.value = f"${liquidation_loss:,.2f}"
+        stress_best_exit_text.value = EXCHANGE_NAMES.get(
+            best_exit_exchange,
+            "Нет данных",
+        )
+        stress_top_loss_text.value = (
+            ", ".join(top_loss_assets)
+            if top_loss_assets
+            else "Критичных источников потерь не обнаружено"
+        )
+        stress_loss_hint_text.value = (
+            f"Потери на ликвидации: {liquidation_loss_pct:.2f}%"
+        )
+        stress_loss_text.color = (
+            ACCENT_COLOR if liquidation_loss > 0.01 else SUCCESS_COLOR
+        )
+
+        decision_summary = get_user_decision_quality_summary(user.id)
+        decision_quality = decision_summary.get('quality_score', 0.0)
+        decision_quality_text.value = f"{decision_quality:.0f}%"
+        decision_loss_text.value = (
+            f"${decision_summary.get('avoidable_loss_total', 0.0):,.2f}"
+        )
+        decision_worst_exchange_text.value = format_exchange_name(
+            decision_summary.get('worst_exchange')
+        )
+        decision_best_exchange_text.value = format_exchange_name(
+            decision_summary.get('best_exchange')
+        )
+        decision_hint_text.value = (
+            f"{decision_summary.get('worst_side_label', 'Нет данных')}"
+            f" · сделок в анализе: {decision_summary.get('records_count', 0)}"
+        )
+        decision_loss_text.color = (
+            ACCENT_COLOR
+            if decision_summary.get('avoidable_loss_total', 0.0) > 0.01
+            else SUCCESS_COLOR
         )
     
     # ============ HEADER ============
@@ -835,32 +1299,6 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
         ))
         return tabs, tab_ids
     
-    tabs_container = ft.Tabs(
-        tabs=[],
-        animation_duration=300,
-        expand=True,
-        indicator_color=PRIMARY_COLOR,
-        label_color=TEXT_PRIMARY,
-        unselected_label_color=TEXT_SECONDARY,
-    )
-
-    portfolio_cache.setdefault("selected_tab_index", 0)
-    portfolio_cache.setdefault("selected_tab_key", "all")
-    portfolio_cache.setdefault("tabs_refreshing", False)
-    portfolio_cache.setdefault("tab_ids", ["all"])
-
-    def on_tabs_change(e):
-        if portfolio_cache.get("tabs_refreshing"):
-            return
-
-        selected_index = e.control.selected_index or 0
-        portfolio_cache["selected_tab_index"] = selected_index
-        tab_ids = portfolio_cache.get("tab_ids", ["all"])
-        if 0 <= selected_index < len(tab_ids):
-            portfolio_cache["selected_tab_key"] = tab_ids[selected_index]
-
-    tabs_container.on_change = on_tabs_change
-    
     # ============ FOOTER ============
     footer = ft.Container(
         content=ft.Row([
@@ -888,31 +1326,17 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
     page.add(
         ft.Column([
             header,
-            ft.Container(content=tabs_container, expand=True, padding=10),
+            decision_quality_panel,
+            stress_sell_panel,
+            assets_gateway_panel,
+            ft.Container(expand=True),
             footer,
-        ], expand=True, spacing=0)
+        ], expand=True, spacing=0, scroll="adaptive")
     )
 
     def render_portfolio(portfolio_data: dict):
         apply_portfolio_summary(portfolio_data)
-        selected_key = portfolio_cache.get("selected_tab_key", "all")
-        tabs, tab_ids = build_tabs(portfolio_data)
-        tabs_container.tabs = tabs
-        portfolio_cache["tab_ids"] = tab_ids
-        selected_index = 0
-
-        for index, tab_id in enumerate(tab_ids):
-            if tab_id == selected_key:
-                selected_index = index
-                break
-
-        if tabs_container.tabs:
-            portfolio_cache["tabs_refreshing"] = True
-            tabs_container.selected_index = selected_index
-            portfolio_cache["selected_tab_index"] = selected_index
-            portfolio_cache["selected_tab_key"] = tab_ids[selected_index]
         page.update()
-        portfolio_cache["tabs_refreshing"] = False
 
     render_portfolio(portfolio)
     page.update()

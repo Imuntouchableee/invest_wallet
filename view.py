@@ -24,6 +24,7 @@ from ui.dialogs import (
 )
 from ui.trading import show_trading_dialog
 from ui.profile import show_profile_page
+from ui.assets_page import show_assets_page
 from ui.main_screen import show_main_screen, show_no_exchanges_screen
 
 
@@ -102,6 +103,16 @@ def main(page: ft.Page):
             show_logout_confirm_callback=_show_logout_confirm,
             show_exchange_settings_callback=_show_exchange_settings,
             show_no_exchanges_callback=_show_no_exchanges,
+            show_assets_page_callback=_show_assets_page,
+        )
+
+    def _show_assets_page():
+        show_assets_page(
+            page=page,
+            current_user=current_user,
+            portfolio_cache=portfolio_cache,
+            show_main_screen_callback=_show_main,
+            show_trading_callback=_show_trading,
         )
     
     def _show_no_exchanges():

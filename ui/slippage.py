@@ -1,7 +1,7 @@
 import flet as ft
 from logging import getLogger
 
-from data.database import DatabaseManager
+from backend.liquidity_analyzer import analyze_liquidity, load_liquidity_profiles
 from ui.config import (
     ACCENT_COLOR,
     BORDER_COLOR,
@@ -10,6 +10,7 @@ from ui.config import (
     EXCHANGE_COLORS,
     EXCHANGE_NAMES,
     PRIMARY_COLOR,
+    SECONDARY_COLOR,
     SUCCESS_COLOR,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
@@ -53,38 +54,23 @@ def _format_qty(value, asset_name):
 
 
 def _load_order_books(symbol):
-    db = DatabaseManager()
-    if not db.connect():
-        return {}, 'Не удалось подключиться к базе данных'
+    profiles, error_message = load_liquidity_profiles(symbol)
+    if error_message:
+        logger.error(f"[SLIPPAGE] Ошибка чтения стаканов: {error_message}")
+        return {}, error_message
 
     books = {}
-    try:
-        for exchange_name, table_name in EXCHANGE_TABLES.items():
-            db.cursor.execute(
-                f"""
-                SELECT current_price, ask_price, ask_volume, bid_price, bid_volume
-                FROM {table_name}
-                WHERE symbol = %s
-                """,
-                (symbol,),
-            )
-            row = db.cursor.fetchone()
-            if not row:
-                books[exchange_name] = None
-                continue
+    for exchange_name in EXCHANGE_TABLES:
+        profile = profiles.get(exchange_name)
+        if not profile:
+            books[exchange_name] = None
+            continue
 
-            current_price, ask_price, ask_volume, bid_price, bid_volume = row
-            books[exchange_name] = {
-                'current_price': _safe_float(current_price),
-                'ask_levels': _normalize_levels(ask_price, ask_volume),
-                'bid_levels': _normalize_levels(bid_price, bid_volume),
-            }
-    except Exception as error:
-        logger.error(f"[SLIPPAGE] Ошибка чтения стаканов: {error}")
-        return {}, 'Не удалось получить данные стакана'
-    finally:
-        db.close()
-
+        books[exchange_name] = {
+            'current_price': _safe_float(profile.get('current_price')),
+            'ask_levels': profile.get('ask_levels') or [],
+            'bid_levels': profile.get('bid_levels') or [],
+        }
     return books, None
 
 
@@ -389,6 +375,303 @@ def _build_result_card(asset_name, exchange_name, side, result, book, is_best):
     )
 
 
+def _get_score_color(score):
+    if score >= 75:
+        return SUCCESS_COLOR
+    if score >= 50:
+        return WARNING_COLOR
+    return ACCENT_COLOR
+
+
+def _get_quality_bg(score):
+    return ft.colors.with_opacity(0.14, _get_score_color(score))
+
+
+def _format_compact_money(value):
+    value = _safe_float(value)
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:.2f}M"
+    if value >= 1_000:
+        return f"${value / 1_000:.1f}K"
+    return f"${value:,.0f}"
+
+
+def _build_liquidity_stat(title, value, subtitle, accent_color):
+    return ft.Container(
+        expand=True,
+        padding=ft.padding.symmetric(horizontal=14, vertical=12),
+        border_radius=14,
+        bgcolor=ft.colors.with_opacity(0.16, "#0d131c"),
+        border=ft.border.all(1, ft.colors.with_opacity(0.34, BORDER_COLOR)),
+        content=ft.Column([
+            ft.Row([
+                ft.Container(
+                    width=8,
+                    height=8,
+                    border_radius=999,
+                    bgcolor=accent_color,
+                ),
+                ft.Text(title, size=9, weight='bold', color=TEXT_SECONDARY),
+            ], spacing=8),
+            ft.Container(height=6),
+            ft.Text(value, size=15, weight='bold', color=TEXT_PRIMARY),
+            ft.Text(subtitle, size=10, color=TEXT_SECONDARY),
+        ], spacing=0),
+    )
+
+
+def _build_liquidity_exchange_row(exchange_score, is_leader):
+    exchange_name = exchange_score.get('exchange_name')
+    exchange_title = EXCHANGE_NAMES.get(exchange_name, exchange_name.upper())
+    score = exchange_score.get('liquidity_score', 0.0)
+    score_color = _get_score_color(score)
+
+    if not exchange_score.get('available'):
+        return ft.Container(
+            padding=ft.padding.symmetric(horizontal=14, vertical=12),
+            border_radius=14,
+            bgcolor=CARD_BG,
+            border=ft.border.all(1, BORDER_COLOR),
+            content=ft.Row([
+                ft.Text(exchange_title, size=13, weight='bold', color=TEXT_PRIMARY),
+                ft.Container(expand=True),
+                ft.Text('Нет данных', size=12, color=TEXT_SECONDARY),
+            ]),
+        )
+
+    return ft.Container(
+        padding=ft.padding.symmetric(horizontal=14, vertical=12),
+        border_radius=14,
+        bgcolor=ft.colors.with_opacity(0.10, score_color),
+        border=ft.border.all(
+            1,
+            ft.colors.with_opacity(0.45, score_color if is_leader else BORDER_COLOR),
+        ),
+        content=ft.Column([
+            ft.Row([
+                ft.Row([
+                    ft.Container(
+                        width=10,
+                        height=10,
+                        border_radius=999,
+                        bgcolor=EXCHANGE_COLORS.get(exchange_name, score_color),
+                    ),
+                    ft.Text(exchange_title, size=13, weight='bold', color=TEXT_PRIMARY),
+                ], spacing=8),
+                ft.Container(expand=True),
+                ft.Container(
+                    visible=is_leader,
+                    padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                    border_radius=999,
+                    bgcolor=ft.colors.with_opacity(0.14, SUCCESS_COLOR),
+                    content=ft.Text(
+                        'ЛИДЕР',
+                        size=9,
+                        weight='bold',
+                        color=SUCCESS_COLOR,
+                    ),
+                ),
+                ft.Container(width=10),
+                ft.Text(f"{score:.1f}", size=18, weight='bold', color=score_color),
+            ], vertical_alignment='center'),
+            ft.Container(height=10),
+            ft.Row([
+                _build_liquidity_stat(
+                    'Качество',
+                    exchange_score.get('execution_quality', 'низкая').upper(),
+                    'общая оценка исполнения',
+                    score_color,
+                ),
+                _build_liquidity_stat(
+                    'Спред',
+                    f"{exchange_score.get('spread_pct', 0.0):.4f}%",
+                    'лучший bid/ask',
+                    PRIMARY_COLOR,
+                ),
+                _build_liquidity_stat(
+                    'Глубина',
+                    _format_compact_money(exchange_score.get('depth_usdt', 0.0)),
+                    'средняя по bid/ask 5 уровней',
+                    SECONDARY_COLOR,
+                ),
+            ], spacing=10),
+            ft.Container(height=10),
+            ft.Row([
+                _build_liquidity_stat(
+                    'Buy 100/500/1000',
+                    f"{exchange_score.get('avg_buy_slippage_pct', 0.0):.4f}%",
+                    'среднее проскальзывание покупки',
+                    ACCENT_COLOR,
+                ),
+                _build_liquidity_stat(
+                    'Sell 100/500/1000',
+                    f"{exchange_score.get('avg_sell_slippage_pct', 0.0):.4f}%",
+                    'среднее проскальзывание продажи',
+                    SUCCESS_COLOR,
+                ),
+                _build_liquidity_stat(
+                    'Стабильность',
+                    f"{exchange_score.get('stability_score', 0.0):.0f}/100",
+                    (
+                        f"комиссия {exchange_score.get('fee_pct', 0.0):.3f}% · "
+                        f"мин. ордер {_format_compact_money(exchange_score.get('min_order_usdt', 0.0))}"
+                    ),
+                    WARNING_COLOR,
+                ),
+            ], spacing=10),
+        ], spacing=0),
+    )
+
+
+def _build_liquidity_section(asset_name, analysis):
+    overall_score = analysis.get('overall_score', 0.0)
+    score_color = _get_score_color(overall_score)
+    ranked_scores = analysis.get('ranked_scores') or []
+    leader_name = ranked_scores[0]['exchange_name'] if ranked_scores else None
+    best_entry_exchange = analysis.get('best_entry_exchange')
+    best_exit_exchange = analysis.get('best_exit_exchange')
+    benchmark_text = '/'.join(str(int(value)) for value in analysis.get('benchmark_amounts', []))
+
+    return ft.Container(
+        padding=20,
+        border_radius=20,
+        bgcolor=CARD_BG,
+        border=ft.border.all(1, ft.colors.with_opacity(0.42, BORDER_COLOR)),
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=20,
+            color=ft.colors.with_opacity(0.18, '#000000'),
+        ),
+        content=ft.Column([
+            ft.Row([
+                ft.Column([
+                    ft.Text(
+                        'ИНДЕКС КАЧЕСТВА ЛИКВИДНОСТИ',
+                        size=12,
+                        weight='bold',
+                        color=TEXT_SECONDARY,
+                    ),
+                    ft.Text(
+                        f'{asset_name}/USDT • исполнение по локальной БД',
+                        size=20,
+                        weight='bold',
+                        color=TEXT_PRIMARY,
+                    ),
+                ], spacing=4),
+                ft.Container(expand=True),
+                ft.Text(
+                    f'Эталонные объёмы: {benchmark_text} USDT',
+                    size=11,
+                    color=TEXT_SECONDARY,
+                ),
+            ], vertical_alignment='center'),
+            ft.Container(height=18),
+            ft.Row([
+                ft.Container(
+                    width=260,
+                    padding=20,
+                    border_radius=18,
+                    gradient=ft.LinearGradient(
+                        begin=ft.alignment.top_left,
+                        end=ft.alignment.bottom_right,
+                        colors=['#0f1722', '#0d131c', '#0b1017'],
+                    ),
+                    border=ft.border.all(
+                        1,
+                        ft.colors.with_opacity(0.45, score_color),
+                    ),
+                    content=ft.Column([
+                        ft.Text('Liquidity Score', size=11, color=TEXT_SECONDARY),
+                        ft.Container(height=6),
+                        ft.Text(
+                            f'{overall_score:.1f}',
+                            size=42,
+                            weight='bold',
+                            color=score_color,
+                        ),
+                        ft.Text(
+                            analysis.get('overall_quality', 'низкая').upper(),
+                            size=13,
+                            weight='bold',
+                            color=TEXT_PRIMARY,
+                        ),
+                        ft.Container(height=10),
+                        ft.ProgressBar(
+                            value=min(max(overall_score / 100.0, 0.0), 1.0),
+                            height=10,
+                            color=score_color,
+                            bgcolor=ft.colors.with_opacity(0.10, score_color),
+                            border_radius=12,
+                        ),
+                        ft.Container(height=10),
+                        ft.Text(
+                            'Индекс учитывает спред, глубину 5 уровней, '\
+                            'проскальзывание, комиссию, порог входа и устойчивость.',
+                            size=11,
+                            color=TEXT_SECONDARY,
+                        ),
+                    ], spacing=0),
+                ),
+                ft.Container(width=16),
+                ft.Column([
+                    ft.Row([
+                        _build_liquidity_stat(
+                            'Execution Quality',
+                            analysis.get('overall_quality', 'низкая').upper(),
+                            'общий режим ликвидности актива',
+                            score_color,
+                        ),
+                        _build_liquidity_stat(
+                            'Best Entry',
+                            EXCHANGE_NAMES.get(best_entry_exchange, 'Нет данных'),
+                            (
+                                f"ориентир {analysis.get('reference_amount', 0.0):.0f} USDT"
+                            ),
+                            PRIMARY_COLOR,
+                        ),
+                    ], spacing=12),
+                    ft.Container(height=12),
+                    ft.Row([
+                        _build_liquidity_stat(
+                            'Best Exit',
+                            EXCHANGE_NAMES.get(best_exit_exchange, 'Нет данных'),
+                            (
+                                f"ориентир {analysis.get('reference_amount', 0.0):.0f} USDT"
+                            ),
+                            SUCCESS_COLOR,
+                        ),
+                        _build_liquidity_stat(
+                            'Market Coverage',
+                            f"{len(ranked_scores)}/{len(EXCHANGE_TABLES)}",
+                            'бирж с валидными данными ликвидности',
+                            WARNING_COLOR,
+                        ),
+                    ], spacing=12),
+                ], expand=True),
+            ], vertical_alignment='start'),
+            ft.Container(height=18),
+            ft.Row([
+                ft.Text('Рейтинг площадок', size=16, weight='bold', color=TEXT_PRIMARY),
+                ft.Container(expand=True),
+                ft.Text(
+                    'Стабильность оценивается по свежести данных, полноте стакана, '\
+                    'балансу bid/ask и гладкости котировок за 1 час.',
+                    size=11,
+                    color=TEXT_SECONDARY,
+                ),
+            ], vertical_alignment='center'),
+            ft.Container(height=12),
+            ft.Column([
+                _build_liquidity_exchange_row(
+                    exchange_score,
+                    exchange_score.get('exchange_name') == leader_name,
+                )
+                for exchange_score in analysis.get('exchange_scores', [])
+            ], spacing=12),
+        ], spacing=0),
+    )
+
+
 def show_slippage_analysis_dialog(page: ft.Page, asset: dict):
     asset_name = (asset or {}).get('currency', '').upper()
     if not asset_name or asset_name in STABLE_ASSETS:
@@ -430,6 +713,7 @@ def show_slippage_analysis_dialog(page: ft.Page, asset: dict):
     recommendation_title = ft.Text('', size=22, weight='bold', color=TEXT_PRIMARY)
     recommendation_subtitle = ft.Text('', size=13, color=TEXT_SECONDARY)
     status_text = ft.Text('', size=12, color=WARNING_COLOR, visible=False)
+    liquidity_section_host = ft.Container()
 
     def close_dialog():
         dialog.open = False
@@ -459,12 +743,35 @@ def show_slippage_analysis_dialog(page: ft.Page, asset: dict):
             status_text.value = 'Введите сумму сделки в USDT больше нуля'
             status_text.visible = True
             results_row.controls = []
+            liquidity_section_host.content = None
             recommendation_title.value = 'Ожидается ввод суммы'
             recommendation_subtitle.value = (
                 'Анализ появится после ввода корректного объёма сделки.'
             )
             page.update()
             return
+
+        liquidity_analysis, liquidity_error = analyze_liquidity(
+            symbol,
+            reference_amount=target_usdt,
+        )
+        if liquidity_error:
+            liquidity_section_host.content = ft.Container(
+                padding=20,
+                border_radius=18,
+                bgcolor=CARD_BG,
+                border=ft.border.all(1, ft.colors.with_opacity(0.30, ACCENT_COLOR)),
+                content=ft.Text(
+                    liquidity_error,
+                    size=12,
+                    color=TEXT_SECONDARY,
+                ),
+            )
+        else:
+            liquidity_section_host.content = _build_liquidity_section(
+                asset_name,
+                liquidity_analysis,
+            )
 
         side = selected_side['value']
         results = []
@@ -666,6 +973,8 @@ def show_slippage_analysis_dialog(page: ft.Page, asset: dict):
                             ),
                         ]),
                         ft.Container(height=16),
+                        liquidity_section_host,
+                        ft.Container(height=18),
                         ft.Row([
                             ft.Text('Сравнение исполнения', size=18, weight='bold', color=TEXT_PRIMARY),
                             ft.Container(expand=True),

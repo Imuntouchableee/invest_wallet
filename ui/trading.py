@@ -9,6 +9,7 @@ from backend.api import (
     get_current_price,
     create_order,
 )
+from backend.decision_quality_analyzer import record_trade_decision
 from ui.config import (
     PRIMARY_COLOR, ACCENT_COLOR, SUCCESS_COLOR, WARNING_COLOR,
     TEXT_PRIMARY, TEXT_SECONDARY, DARK_BG, CARD_BG, INPUT_BG, BORDER_COLOR,
@@ -1183,6 +1184,28 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             key.api_key, key.secret_key, getattr(key, 'passphrase', None)
         )
         if success:
+            actual_execution_price = 0.0
+            if selected_order_type in ('limit', 'stop-limit') and price:
+                actual_execution_price = price
+            elif result.get('price'):
+                actual_execution_price = to_float(result.get('price'))
+            elif pair_info:
+                actual_execution_price = to_float(pair_info.get('current_price'))
+
+            try:
+                record_trade_decision(
+                    user_id=current_user_id,
+                    symbol=symbol,
+                    side=side_selector_value,
+                    actual_exchange=current_exchange,
+                    amount=amount,
+                    actual_price=actual_execution_price,
+                )
+            except Exception as analytics_error:
+                logger.error(
+                    f"[TRADING] Ошибка записи качества решения: {analytics_error}"
+                )
+
             show_status("Ордер отправлен", "success")
             logger.info(
                 f"[TRADING] Ордер {side_selector_value} {result.get('amount')} "

@@ -6,6 +6,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     create_engine,
 )
 from sqlalchemy.orm import relationship, sessionmaker
@@ -56,6 +57,11 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    trade_decisions = relationship(
+        "TradeDecisionHistory",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self):
         return f"User('{self.name}', email='{self.email}')"
@@ -103,6 +109,34 @@ class PortfolioHistory(Base):
     mexc_value = Column(Float, default=0.0)
     
     user = relationship("User", back_populates="portfolio_history")
+
+
+class TradeDecisionHistory(Base):
+    """История качества торговых решений пользователя."""
+    __tablename__ = 'trade_decision_history'
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+    symbol = Column(String, nullable=False)
+    side = Column(String, nullable=False)
+    actual_exchange = Column(String, nullable=False)
+    actual_price = Column(Float, default=0.0)
+    amount = Column(Float, default=0.0)
+    notional_usdt = Column(Float, default=0.0)
+
+    best_exchange = Column(String, nullable=True)
+    best_possible_price = Column(Float, default=0.0)
+    best_liquidity_exchange = Column(String, nullable=True)
+    alternative_prices = Column(Text, nullable=True)
+
+    avoidable_loss = Column(Float, default=0.0)
+    avoidable_loss_pct = Column(Float, default=0.0)
+    execution_quality_score = Column(Float, default=0.0)
+    liquidity_alignment_score = Column(Float, default=0.0)
+
+    user = relationship("User", back_populates="trade_decisions")
 
 
 def build_postgres_url() -> str:
