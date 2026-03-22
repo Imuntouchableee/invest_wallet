@@ -122,56 +122,294 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
     portfolio = fetch_user_portfolio(user_keys)
     portfolio_cache["data"] = portfolio
     portfolio_cache["timestamp"] = datetime.now()
-    
+
     page.controls.clear()
-    
-    # Определяем уровень
-    level_name, level_color, level_icon = get_user_level(portfolio['total_usd'])
+
+    total_value_text = ft.Text(
+        "$0.00",
+        size=32,
+        weight="w700",
+        color=TEXT_PRIMARY,
+    )
+    level_chip_text = ft.Text("", size=10, weight="bold", color=DARK_BG)
+    user_name_text = ft.Text(
+        user.name,
+        size=18,
+        weight="bold",
+        color=TEXT_PRIMARY,
+    )
+    connected_exchanges_text = ft.Text(
+        str(len(user_keys)),
+        size=16,
+        color=TEXT_PRIMARY,
+        weight="bold",
+    )
+    assets_count_text = ft.Text(
+        "0",
+        size=16,
+        color=TEXT_PRIMARY,
+        weight="bold",
+    )
+    balance_caption_text = ft.Text(
+        "Совокупная стоимость",
+        size=11,
+        color=TEXT_SECONDARY,
+    )
+    update_time_text = ft.Text(
+        "Обновлено только что",
+        size=10,
+        color=TEXT_SECONDARY,
+    )
+    reserve_text = ft.Text(
+        "$0",
+        size=16,
+        color=TEXT_PRIMARY,
+        weight="bold",
+    )
+    sync_status_text = ft.Text(
+        "Синхронизация активна",
+        size=9,
+        color=PRIMARY_COLOR,
+        weight="bold",
+    )
+    sync_status_chip = ft.Container(
+        content=ft.Row([
+            ft.Icon(ft.icons.SYNC, size=12, color=PRIMARY_COLOR),
+            sync_status_text,
+        ], spacing=6, vertical_alignment="center"),
+        padding=ft.padding.symmetric(horizontal=8, vertical=5),
+        border_radius=999,
+        bgcolor=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
+        border=ft.border.all(
+            1,
+            ft.colors.with_opacity(0.25, PRIMARY_COLOR),
+        ),
+    )
+    level_chip = ft.Container(
+        content=level_chip_text,
+        bgcolor=PRIMARY_COLOR,
+        padding=ft.padding.symmetric(horizontal=9, vertical=3),
+        border_radius=999,
+    )
+
+    def create_info_cell(title: str, value_control, accent_color: str):
+        return ft.Container(
+            content=ft.Column([
+                ft.Text(title, size=8, color=TEXT_SECONDARY),
+                ft.Row([
+                    ft.Container(
+                        width=6,
+                        height=6,
+                        border_radius=999,
+                        bgcolor=accent_color,
+                    ),
+                    value_control,
+                ], spacing=8, vertical_alignment="center"),
+            ], spacing=4),
+            padding=ft.padding.symmetric(horizontal=12, vertical=9),
+            border_radius=14,
+            bgcolor=ft.colors.with_opacity(0.18, "#0b1119"),
+            border=ft.border.all(1, ft.colors.with_opacity(0.44, BORDER_COLOR)),
+            expand=True,
+        )
+
+    header_divider = ft.Container(
+        width=1,
+        height=74,
+        bgcolor=ft.colors.with_opacity(0.65, BORDER_COLOR),
+        border_radius=999,
+    )
+
+    profile_panel = ft.Container(
+        content=ft.Row([
+            ft.Container(
+                content=ft.CircleAvatar(
+                    content=ft.Text(
+                        user.name[0].upper(),
+                        size=20,
+                        weight="bold",
+                        color=DARK_BG,
+                    ),
+                    radius=22,
+                    bgcolor=user.avatar_color or PRIMARY_COLOR,
+                ),
+                padding=3,
+                border_radius=999,
+                border=ft.border.all(
+                    1,
+                    ft.colors.with_opacity(0.35, PRIMARY_COLOR),
+                ),
+            ),
+            ft.Column([
+                ft.Text(
+                    "ПРОФИЛЬ",
+                    size=8,
+                    weight="bold",
+                    color=TEXT_SECONDARY,
+                ),
+                ft.Row([
+                    user_name_text,
+                    level_chip,
+                ], spacing=6, vertical_alignment="center"),
+            ], spacing=3, alignment="center"),
+        ], spacing=12, vertical_alignment="center"),
+        width=250,
+        on_click=lambda e: show_profile_callback(),
+        ink=True,
+    )
+
+    value_panel = ft.Container(
+        content=ft.Row([
+            ft.Container(
+                width=4,
+                height=58,
+                border_radius=999,
+                gradient=ft.LinearGradient(
+                    begin=ft.alignment.top_center,
+                    end=ft.alignment.bottom_center,
+                    colors=[PRIMARY_COLOR, SECONDARY_COLOR],
+                ),
+            ),
+            ft.Container(width=14),
+            ft.Column([
+                ft.Row([
+                    ft.Text(
+                        "КОНСОЛИДИРОВАННЫЙ ПОРТФЕЛЬ",
+                        size=9,
+                        weight="bold",
+                        color=TEXT_SECONDARY,
+                    ),
+                    ft.Container(expand=True),
+                    sync_status_chip,
+                ], vertical_alignment="center"),
+                total_value_text,
+                ft.Row([
+                    balance_caption_text,
+                    ft.Text("•", size=10, color=BORDER_COLOR),
+                    update_time_text,
+                ], spacing=8, vertical_alignment="center"),
+            ], spacing=3, expand=True),
+        ], spacing=0, vertical_alignment="center"),
+        expand=True,
+        height=120,
+        padding=ft.padding.symmetric(horizontal=16, vertical=10),
+        border_radius=18,
+        gradient=ft.LinearGradient(
+            begin=ft.alignment.top_left,
+            end=ft.alignment.bottom_right,
+            colors=["#101824", "#0c141e", "#0b1018"],
+        ),
+        border=ft.border.all(
+            1,
+            ft.colors.with_opacity(0.56, PRIMARY_COLOR),
+        ),
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=18,
+            color=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
+            offset=ft.Offset(0, 8),
+        ),
+    )
+
+    def apply_portfolio_summary(portfolio_data: dict):
+        level_name, level_color, _level_icon = get_user_level(portfolio_data['total_usd'])
+        level_chip_text.value = level_name
+        level_chip.bgcolor = level_color
+        total_value_text.value = f"${portfolio_data['total_usd']:,.2f}"
+        assets_count_text.value = (
+            str(len(portfolio_data['all_assets']))
+        )
+        stable_value = sum(
+            asset['value_usd']
+            for asset in portfolio_data['all_assets']
+            if asset['currency'].upper() in ('USDT', 'USDC', 'BUSD', 'DAI')
+        )
+        reserve_text.value = f"${stable_value:,.0f}"
+        if any(
+            exchange_data['status'] == 'loading'
+            for exchange_data in portfolio_data['exchanges'].values()
+        ):
+            sync_status_text.value = "Часть данных обновляется"
+            sync_status_text.color = WARNING_COLOR
+            sync_status_chip.content.controls[0].color = WARNING_COLOR
+            sync_status_chip.bgcolor = ft.colors.with_opacity(0.12, WARNING_COLOR)
+            sync_status_chip.border = ft.border.all(
+                1,
+                ft.colors.with_opacity(0.25, WARNING_COLOR),
+            )
+        else:
+            sync_status_text.value = "Синхронизация активна"
+            sync_status_text.color = PRIMARY_COLOR
+            sync_status_chip.content.controls[0].color = PRIMARY_COLOR
+            sync_status_chip.bgcolor = ft.colors.with_opacity(0.12, PRIMARY_COLOR)
+            sync_status_chip.border = ft.border.all(
+                1,
+                ft.colors.with_opacity(0.25, PRIMARY_COLOR),
+            )
+
+        last_update = portfolio_cache.get("timestamp") or datetime.now()
+        update_time_text.value = (
+            f"Обновлено: {last_update.strftime('%H:%M:%S')}"
+        )
     
     # ============ HEADER ============
     header = ft.Container(
-        content=ft.Row([
-            # Профиль
-            ft.Container(
-                content=ft.Row([
-                    ft.CircleAvatar(
-                        content=ft.Text(user.name[0].upper(), size=24, weight="bold", color=DARK_BG),
-                        radius=30,
-                        bgcolor=user.avatar_color or PRIMARY_COLOR,
-                    ),
-                    ft.Column([
+        content=ft.Container(
+            content=ft.Row([
+                profile_panel,
+                ft.Container(width=14),
+                header_divider,
+                ft.Container(width=14),
+                value_panel,
+                ft.Container(width=14),
+                header_divider,
+                ft.Container(width=14),
+                ft.Container(
+                    width=290,
+                    content=ft.Column([
                         ft.Row([
-                            ft.Text(user.name, size=18, weight="bold", color=TEXT_PRIMARY),
-                            ft.Container(
-                                content=ft.Text(level_name, size=10, weight="bold", color=DARK_BG),
-                                bgcolor=level_color,
-                                padding=ft.padding.symmetric(horizontal=8, vertical=2),
-                                border_radius=10,
+                            create_info_cell(
+                                "БИРЖИ",
+                                connected_exchanges_text,
+                                PRIMARY_COLOR,
                             ),
-                        ], spacing=10, vertical_alignment="center"),
-                        ft.Text(f"Подключено бирж: {len(user_keys)}", size=12, color=TEXT_SECONDARY),
-                    ], spacing=2),
-                ], spacing=15),
-                on_click=lambda e: show_profile_callback(),
-                ink=True,
+                            create_info_cell(
+                                "АКТИВЫ",
+                                assets_count_text,
+                                SECONDARY_COLOR,
+                            ),
+                        ], spacing=8),
+                        ft.Row([
+                            create_info_cell(
+                                "РЕЗЕРВ",
+                                reserve_text,
+                                WARNING_COLOR,
+                            ),
+                        ], spacing=8),
+                    ], spacing=8),
+                ),
+            ], spacing=0, vertical_alignment="center"),
+            padding=12,
+            border_radius=22,
+            gradient=ft.LinearGradient(
+                begin=ft.alignment.top_left,
+                end=ft.alignment.bottom_right,
+                colors=["#151a25", "#0f141d", "#0b1017"],
             ),
-            ft.Container(expand=True),
-            # Общий баланс
-            ft.Column([
-                ft.Text("Общий портфель", size=12, color=TEXT_SECONDARY),
-                ft.Text(f"${portfolio['total_usd']:,.2f}", size=28, weight="bold", color=SUCCESS_COLOR),
-            ], spacing=2, horizontal_alignment="end"),
-            # Выход
-            ft.IconButton(
-                icon=ft.icons.LOGOUT,
-                icon_color=ACCENT_COLOR,
-                tooltip="Выйти",
-                on_click=lambda e: show_logout_confirm_callback(),
+            border=ft.border.all(
+                1,
+                ft.colors.with_opacity(0.62, BORDER_COLOR),
             ),
-        ], alignment="spaceBetween", vertical_alignment="center"),
-        padding=20,
-        bgcolor=CARD_BG,
-        border=ft.border.only(bottom=ft.BorderSide(1, BORDER_COLOR)),
+            shadow=ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=16,
+                color=ft.colors.with_opacity(0.20, "#000000"),
+                offset=ft.Offset(0, 8),
+            ),
+        ),
+        height=150,
+        padding=ft.padding.only(left=18, top=6, right=18, bottom=4),
+        bgcolor=DARK_BG,
     )
     
     # ============ ВКЛАДКИ БИРЖ ============
@@ -182,13 +420,33 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
         # кнопки покупки/продажи — стили согласованы с trading.py
         BUY_COLOR = "#00C853"
         SELL_COLOR = "#FF5252"
+
+        if data['status'] == 'loading':
+            return ft.Container(
+                content=ft.Column([
+                    ft.ProgressRing(color=color, width=48, height=48),
+                    ft.Container(height=10),
+                    ft.Text(
+                        f"Синхронизация данных {name}",
+                        size=18,
+                        color=color,
+                    ),
+                    ft.Text(
+                        data.get('error', 'Ожидание данных из базы данных'),
+                        size=14,
+                        color=TEXT_SECONDARY,
+                    ),
+                ], alignment="center", horizontal_alignment="center"),
+                expand=True,
+                alignment=ft.alignment.center,
+            )
         
         if data['status'] == 'error':
             return ft.Container(
                 content=ft.Column([
                     ft.Icon(ft.icons.ERROR_OUTLINE, size=64, color=ACCENT_COLOR),
                     ft.Container(height=10),
-                    ft.Text(f"Ошибка подключения к {name}", size=18, color=ACCENT_COLOR),
+                    ft.Text(f"Ошибка данных {name}", size=18, color=ACCENT_COLOR),
                     ft.Text(data.get('error', 'Неизвестная ошибка'), size=14, color=TEXT_SECONDARY),
                 ], alignment="center", horizontal_alignment="center"),
                 expand=True,
@@ -399,164 +657,209 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
             expand=True,
         )
     
-    # Создаем вкладки
-    tabs = []
-    for exchange_name, data in portfolio['exchanges'].items():
-        color = EXCHANGE_COLORS.get(exchange_name, PRIMARY_COLOR)
-        name = EXCHANGE_NAMES.get(exchange_name, exchange_name.upper())
-        
-        status_icon = ft.icons.CHECK_CIRCLE if data['status'] == 'success' else ft.icons.ERROR
-        status_color = SUCCESS_COLOR if data['status'] == 'success' else ACCENT_COLOR
-        
-        tabs.append(
-            ft.Tab(
-                tab_content=ft.Row([
-                    ft.Icon(status_icon, size=14, color=status_color),
-                    ft.Text(name, color=color, weight="bold"),
-                    ft.Text(f"${data['total_usd']:,.0f}", size=12, color=TEXT_SECONDARY) if data['status'] == 'success' else ft.Container(),
-                ], spacing=8),
-                content=create_exchange_tab(exchange_name, data),
+    def build_tabs(portfolio_data: dict):
+        tabs = []
+        tab_ids = ["all"]
+        for exchange_name, data in portfolio_data['exchanges'].items():
+            color = EXCHANGE_COLORS.get(exchange_name, PRIMARY_COLOR)
+            name = EXCHANGE_NAMES.get(exchange_name, exchange_name.upper())
+
+            if data['status'] == 'success':
+                status_icon = ft.icons.CHECK_CIRCLE
+                status_color = SUCCESS_COLOR
+            elif data['status'] == 'loading':
+                status_icon = ft.icons.SYNC
+                status_color = WARNING_COLOR
+            else:
+                status_icon = ft.icons.ERROR
+                status_color = ACCENT_COLOR
+
+            tabs.append(
+                ft.Tab(
+                    tab_content=ft.Row([
+                        ft.Icon(status_icon, size=14, color=status_color),
+                        ft.Text(name, color=color, weight="bold"),
+                        ft.Text(
+                            f"${data['total_usd']:,.0f}",
+                            size=12,
+                            color=TEXT_SECONDARY,
+                        ) if data['status'] == 'success' else ft.Container(),
+                    ], spacing=8),
+                    content=create_exchange_tab(exchange_name, data),
+                )
             )
-        )
-    
-    # Добавляем вкладку "Все активы"
-    all_assets_content = ft.Column(spacing=8, scroll="adaptive", expand=True)
-    
-    # Фильтруем стейблкоины из общего списка
-    tradable_all_assets = [a for a in portfolio['all_assets'] 
-                           if a['currency'].upper() not in ('USDT', 'USDC', 'BUSD', 'DAI')]
-    
-    for asset in tradable_all_assets:
-        exchange_color = EXCHANGE_COLORS.get(asset['exchange'], PRIMARY_COLOR)
-        all_assets_content.controls.append(
-            ft.Container(
-                content=ft.Row([
-                    ft.Container(
-                        content=ft.Text(
-                            asset['currency'][:4], 
-                            size=12, weight="bold", 
-                            color=DARK_BG, text_align="center"
-                        ),
-                        width=45, height=45,
-                        border_radius=10,
-                        bgcolor=exchange_color,
-                        alignment=ft.alignment.center,
-                    ),
-                    ft.Column([
-                        ft.Text(asset['currency'], size=16, weight="bold", color=TEXT_PRIMARY),
-                        ft.Row([
-                            ft.Container(
-                                content=ft.Text(EXCHANGE_NAMES.get(asset['exchange'], asset['exchange']), 
-                                               size=10, color=DARK_BG),
-                                bgcolor=exchange_color,
-                                padding=ft.padding.symmetric(horizontal=6, vertical=2),
-                                border_radius=6,
-                            ),
-                            ft.Text(f"Кол-во: {asset['amount']:.6f}", size=11, color=TEXT_SECONDARY),
-                        ], spacing=8),
-                    ], spacing=4, expand=True),
-                    ft.Column([
-                        ft.Text(f"${asset['value_usd']:.2f}", size=16, weight="bold", color=SUCCESS_COLOR),
-                        ft.Text(f"${asset['price_usd']:.4f}", size=11, color=TEXT_SECONDARY),
-                    ], spacing=2, horizontal_alignment="end"),
-                    # Кнопки покупки/продажи
-                    ft.Row([
-                        ft.Container(
-                            content=ft.Icon(
-                                ft.icons.SHOW_CHART,
-                                size=18,
-                                color=PRIMARY_COLOR,
-                            ),
-                            width=36,
-                            height=36,
-                            border_radius=8,
-                            bgcolor=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
-                            alignment=ft.alignment.center,
-                            on_click=_make_slippage_handler(page, asset),
-                            ink=True,
-                            tooltip="Анализ проскальзывания",
-                        ),
-                        ft.Container(
-                            content=ft.Icon(ft.icons.ARROW_DOWNWARD, size=18, color=DARK_BG),
-                            width=36, height=36,
-                            border_radius=8,
-                            bgcolor=SUCCESS_COLOR,
-                            alignment=ft.alignment.center,
-                            on_click=_make_trade_handler(
-                                show_trading_callback,
-                                asset=asset,
-                                exchange_name=asset['exchange'],
-                                side="buy",
-                            ),
-                            ink=True,
-                            tooltip="Купить",
-                        ),
-                        ft.Container(
-                            content=ft.Icon(ft.icons.ARROW_UPWARD, size=18, color=DARK_BG),
-                            width=36, height=36,
-                            border_radius=8,
-                            bgcolor=ACCENT_COLOR,
-                            alignment=ft.alignment.center,
-                            on_click=_make_trade_handler(
-                                show_trading_callback,
-                                asset=asset,
-                                exchange_name=asset['exchange'],
-                                side="sell",
-                            ),
-                            ink=True,
-                            tooltip="Продать",
-                        ),
-                    ], spacing=6),
-                ], vertical_alignment="center"),
-                padding=15,
-                bgcolor=CARD_BG,
-                border_radius=12,
-                border=ft.border.all(1, BORDER_COLOR),
-            )
-        )
-    
-    tabs.insert(0, ft.Tab(
-        tab_content=ft.Row([
-            ft.Icon(ft.icons.ALL_INCLUSIVE, size=14, color=PRIMARY_COLOR),
-            ft.Text("Все активы", color=PRIMARY_COLOR, weight="bold"),
-            ft.Text(f"${portfolio['total_usd']:,.0f}", size=12, color=TEXT_SECONDARY),
-        ], spacing=8),
-        content=ft.Container(
-            content=ft.Column([
+            tab_ids.append(exchange_name)
+
+        all_assets_content = ft.Column(spacing=8, scroll="adaptive", expand=True)
+        tradable_all_assets = [
+            asset for asset in portfolio_data['all_assets']
+            if asset['currency'].upper() not in ('USDT', 'USDC', 'BUSD', 'DAI')
+        ]
+
+        for asset in tradable_all_assets:
+            exchange_color = EXCHANGE_COLORS.get(asset['exchange'], PRIMARY_COLOR)
+            all_assets_content.controls.append(
                 ft.Container(
                     content=ft.Row([
-                        ft.Icon(ft.icons.WALLET, size=24, color=PRIMARY_COLOR),
-                        ft.Text("Все активы", size=20, weight="bold", color=PRIMARY_COLOR),
-                        ft.Container(expand=True),
-                        ft.Text(f"Торгуемых: {len(tradable_all_assets)} активов", size=14, color=TEXT_SECONDARY),
+                        ft.Container(
+                            content=ft.Text(
+                                asset['currency'][:4],
+                                size=12,
+                                weight="bold",
+                                color=DARK_BG,
+                                text_align="center",
+                            ),
+                            width=45,
+                            height=45,
+                            border_radius=10,
+                            bgcolor=exchange_color,
+                            alignment=ft.alignment.center,
+                        ),
+                        ft.Column([
+                            ft.Text(asset['currency'], size=16, weight="bold", color=TEXT_PRIMARY),
+                            ft.Row([
+                                ft.Container(
+                                    content=ft.Text(
+                                        EXCHANGE_NAMES.get(asset['exchange'], asset['exchange']),
+                                        size=10,
+                                        color=DARK_BG,
+                                    ),
+                                    bgcolor=exchange_color,
+                                    padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                                    border_radius=6,
+                                ),
+                                ft.Text(
+                                    f"Кол-во: {asset['amount']:.6f}",
+                                    size=11,
+                                    color=TEXT_SECONDARY,
+                                ),
+                            ], spacing=8),
+                        ], spacing=4, expand=True),
+                        ft.Column([
+                            ft.Text(f"${asset['value_usd']:.2f}", size=16, weight="bold", color=SUCCESS_COLOR),
+                            ft.Text(f"${asset['price_usd']:.4f}", size=11, color=TEXT_SECONDARY),
+                        ], spacing=2, horizontal_alignment="end"),
+                        ft.Row([
+                            ft.Container(
+                                content=ft.Icon(
+                                    ft.icons.SHOW_CHART,
+                                    size=18,
+                                    color=PRIMARY_COLOR,
+                                ),
+                                width=36,
+                                height=36,
+                                border_radius=8,
+                                bgcolor=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
+                                alignment=ft.alignment.center,
+                                on_click=_make_slippage_handler(page, asset),
+                                ink=True,
+                                tooltip="Анализ проскальзывания",
+                            ),
+                            ft.Container(
+                                content=ft.Icon(ft.icons.ARROW_DOWNWARD, size=18, color=DARK_BG),
+                                width=36,
+                                height=36,
+                                border_radius=8,
+                                bgcolor=SUCCESS_COLOR,
+                                alignment=ft.alignment.center,
+                                on_click=_make_trade_handler(
+                                    show_trading_callback,
+                                    asset=asset,
+                                    exchange_name=asset['exchange'],
+                                    side="buy",
+                                ),
+                                ink=True,
+                                tooltip="Купить",
+                            ),
+                            ft.Container(
+                                content=ft.Icon(ft.icons.ARROW_UPWARD, size=18, color=DARK_BG),
+                                width=36,
+                                height=36,
+                                border_radius=8,
+                                bgcolor=ACCENT_COLOR,
+                                alignment=ft.alignment.center,
+                                on_click=_make_trade_handler(
+                                    show_trading_callback,
+                                    asset=asset,
+                                    exchange_name=asset['exchange'],
+                                    side="sell",
+                                ),
+                                ink=True,
+                                tooltip="Продать",
+                            ),
+                        ], spacing=6),
                     ], vertical_alignment="center"),
                     padding=15,
-                    bgcolor=ft.colors.with_opacity(0.1, PRIMARY_COLOR),
+                    bgcolor=CARD_BG,
                     border_radius=12,
-                    margin=ft.margin.only(bottom=15),
-                ),
-                all_assets_content if tradable_all_assets else ft.Container(
-                    content=ft.Column([
-                        ft.Icon(ft.icons.SAVINGS, size=64, color=TEXT_SECONDARY),
-                        ft.Text("Нет активов", size=18, color=TEXT_SECONDARY),
-                    ], alignment="center", horizontal_alignment="center"),
-                    expand=True,
-                    alignment=ft.alignment.center,
-                ),
-            ], expand=True),
-            padding=15,
-            expand=True,
-        ),
-    ))
+                    border=ft.border.all(1, BORDER_COLOR),
+                )
+            )
+
+        tabs.insert(0, ft.Tab(
+            tab_content=ft.Row([
+                ft.Icon(ft.icons.ALL_INCLUSIVE, size=14, color=PRIMARY_COLOR),
+                ft.Text("Все активы", color=PRIMARY_COLOR, weight="bold"),
+                ft.Text(f"${portfolio_data['total_usd']:,.0f}", size=12, color=TEXT_SECONDARY),
+            ], spacing=8),
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.icons.WALLET, size=24, color=PRIMARY_COLOR),
+                            ft.Text("Все активы", size=20, weight="bold", color=PRIMARY_COLOR),
+                            ft.Container(expand=True),
+                            ft.Text(
+                                f"Торгуемых: {len(tradable_all_assets)} активов",
+                                size=14,
+                                color=TEXT_SECONDARY,
+                            ),
+                        ], vertical_alignment="center"),
+                        padding=15,
+                        bgcolor=ft.colors.with_opacity(0.1, PRIMARY_COLOR),
+                        border_radius=12,
+                        margin=ft.margin.only(bottom=15),
+                    ),
+                    all_assets_content if tradable_all_assets else ft.Container(
+                        content=ft.Column([
+                            ft.Icon(ft.icons.SAVINGS, size=64, color=TEXT_SECONDARY),
+                            ft.Text("Нет активов", size=18, color=TEXT_SECONDARY),
+                        ], alignment="center", horizontal_alignment="center"),
+                        expand=True,
+                        alignment=ft.alignment.center,
+                    ),
+                ], expand=True),
+                padding=15,
+                expand=True,
+            ),
+        ))
+        return tabs, tab_ids
     
     tabs_container = ft.Tabs(
-        tabs=tabs,
+        tabs=[],
         animation_duration=300,
         expand=True,
         indicator_color=PRIMARY_COLOR,
         label_color=TEXT_PRIMARY,
         unselected_label_color=TEXT_SECONDARY,
     )
+
+    portfolio_cache.setdefault("selected_tab_index", 0)
+    portfolio_cache.setdefault("selected_tab_key", "all")
+    portfolio_cache.setdefault("tabs_refreshing", False)
+    portfolio_cache.setdefault("tab_ids", ["all"])
+
+    def on_tabs_change(e):
+        if portfolio_cache.get("tabs_refreshing"):
+            return
+
+        selected_index = e.control.selected_index or 0
+        portfolio_cache["selected_tab_index"] = selected_index
+        tab_ids = portfolio_cache.get("tab_ids", ["all"])
+        if 0 <= selected_index < len(tab_ids):
+            portfolio_cache["selected_tab_key"] = tab_ids[selected_index]
+
+    tabs_container.on_change = on_tabs_change
     
     # ============ FOOTER ============
     footer = ft.Container(
@@ -589,12 +892,35 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
             footer,
         ], expand=True, spacing=0)
     )
+
+    def render_portfolio(portfolio_data: dict):
+        apply_portfolio_summary(portfolio_data)
+        selected_key = portfolio_cache.get("selected_tab_key", "all")
+        tabs, tab_ids = build_tabs(portfolio_data)
+        tabs_container.tabs = tabs
+        portfolio_cache["tab_ids"] = tab_ids
+        selected_index = 0
+
+        for index, tab_id in enumerate(tab_ids):
+            if tab_id == selected_key:
+                selected_index = index
+                break
+
+        if tabs_container.tabs:
+            portfolio_cache["tabs_refreshing"] = True
+            tabs_container.selected_index = selected_index
+            portfolio_cache["selected_tab_index"] = selected_index
+            portfolio_cache["selected_tab_key"] = tab_ids[selected_index]
+        page.update()
+        portfolio_cache["tabs_refreshing"] = False
+
+    render_portfolio(portfolio)
     page.update()
     
-    # Автообновление каждые 60 секунд
+    # Автообновление каждые 10 секунд только из БД
     def auto_refresh():
         import time
-        time.sleep(60)
+        time.sleep(10)
         while current_user["user"] is not None:
             try:
                 user_keys_refresh = session.query(ExchangeAPIKey).filter_by(user_id=current_user["user"].id, is_active=True).all()
@@ -602,11 +928,15 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                     portfolio_new = fetch_user_portfolio(user_keys_refresh)
                     portfolio_cache["data"] = portfolio_new
                     portfolio_cache["timestamp"] = datetime.now()
+                    render_portfolio(portfolio_new)
                     logger.info(f"[OK] Портфель обновлён. Общая стоимость: ${portfolio_new['total_usd']:,.2f}")
             except Exception as e:
                 logger.error(f"[ERROR] Ошибка обновления портфеля: {str(e)[:100]}")
-            time.sleep(60)
-    
-    refresh_thread = threading.Thread(target=auto_refresh, daemon=True)
-    refresh_thread.start()
-    logger.info(f"[START] Автообновление портфеля запущено (интервал: 60 сек)")
+            time.sleep(10)
+
+    refresh_thread = portfolio_cache.get("refresh_thread")
+    if not refresh_thread or not refresh_thread.is_alive():
+        refresh_thread = threading.Thread(target=auto_refresh, daemon=True)
+        refresh_thread.start()
+        portfolio_cache["refresh_thread"] = refresh_thread
+        logger.info("[START] Автообновление портфеля запущено (интервал: 10 сек)")

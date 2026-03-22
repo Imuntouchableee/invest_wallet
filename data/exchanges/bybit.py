@@ -1,6 +1,10 @@
 """BYBIT Exchange API"""
 import ccxt
-from config import QUOTE_CURRENCY
+
+try:
+    from data.config import QUOTE_CURRENCY
+except ImportError:
+    from config import QUOTE_CURRENCY
 
 
 class BybitExchange:
@@ -18,7 +22,16 @@ class BybitExchange:
                 'apiKey': self.api_key,
                 'secret': self.api_secret,
                 'enableRateLimit': True,
+                'options': {
+                    'recvWindow': 5000,
+                    'adjustForTimeDifference': True,
+                    'defaultType': 'spot',
+                },
             })
+            try:
+                self.ccxt_exchange.load_time_difference()
+            except Exception:
+                pass
             self.ccxt_exchange.fetch_balance()
             self.is_connected = True
             print("✓ BYBIT подключена")

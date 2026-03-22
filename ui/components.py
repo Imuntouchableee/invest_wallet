@@ -36,13 +36,29 @@ def create_exchange_card(exchange_name: str, data: dict, color: str, on_asset_cl
     """Создает карточку биржи с активами"""
     from ui.config import EXCHANGE_NAMES
     name = EXCHANGE_NAMES.get(exchange_name, exchange_name.upper())
+
+    if data['status'] == 'loading':
+        return ft.Container(
+            content=ft.Column([
+                ft.ProgressRing(color=color, width=48, height=48),
+                ft.Container(height=10),
+                ft.Text(f"Синхронизация данных {name}", size=18, color=color),
+                ft.Text(
+                    data.get('error', 'Ожидание данных из базы данных'),
+                    size=14,
+                    color=TEXT_SECONDARY,
+                ),
+            ], alignment="center", horizontal_alignment="center"),
+            expand=True,
+            alignment=ft.alignment.center,
+        )
     
     if data['status'] == 'error':
         return ft.Container(
             content=ft.Column([
                 ft.Icon(ft.icons.ERROR_OUTLINE, size=64, color=ACCENT_COLOR),
                 ft.Container(height=10),
-                ft.Text(f"Ошибка подключения к {name}", size=18, color=ACCENT_COLOR),
+                ft.Text(f"Ошибка данных {name}", size=18, color=ACCENT_COLOR),
                 ft.Text(data.get('error', 'Неизвестная ошибка'), size=14, color=TEXT_SECONDARY),
             ], alignment="center", horizontal_alignment="center"),
             expand=True,

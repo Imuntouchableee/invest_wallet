@@ -8,10 +8,9 @@ from data.database import DatabaseManager
 from backend.api import (
     get_current_price,
     create_order,
-    fetch_balance_for_exchange,
 )
 from ui.config import (
-    PRIMARY_COLOR, ACCENT_COLOR, SUCCESS_COLOR, WARNING_COLOR, 
+    PRIMARY_COLOR, ACCENT_COLOR, SUCCESS_COLOR, WARNING_COLOR,
     TEXT_PRIMARY, TEXT_SECONDARY, DARK_BG, CARD_BG, INPUT_BG, BORDER_COLOR,
     EXCHANGE_NAMES
 )
@@ -29,7 +28,10 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         page.snack_bar = ft.SnackBar(
             content=ft.Row([
                 ft.Icon(ft.icons.ERROR_OUTLINE, color="#FF5252"),
-                ft.Text("Нет подключенных бирж. Добавьте API ключ в настройках.", color=TEXT_PRIMARY),
+                ft.Text(
+                    "Нет подключенных бирж. Добавьте API ключ в настройках.",
+                    color=TEXT_PRIMARY,
+                ),
             ], spacing=10),
             bgcolor=CARD_BG,
         )
@@ -65,8 +67,9 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         # показать статус позже, когда определим функцию show_status
         logger.error("[TRADING] Не удалось подключиться к локальной БД")
 
-    exchange_key_map = {k.exchange_name: k for k in user_keys}
-    live_balance_cache = {}
+    current_user_id = (
+        current_user["user"].id if current_user.get("user") else None
+    )
 
     def to_float(value, default=0.0):
         try:
@@ -77,86 +80,24 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     # функции доступа к локальным таблицам
     def query_pair_info(exchange, symbol):
         try:
-            db.cursor.execute(
-                f"SELECT current_price, change_24h_percent, change_24h_absolute, high_24h, low_24h, volume_24h, maker_fee, taker_fee, min_order_amount, lot_size"
-                f" FROM {exchange}_pairs WHERE symbol=%s",
-                (symbol,)
-            )
-            row = db.cursor.fetchone()
+            row = db.get_pair_info(exchange, symbol)
             if row:
-                keys = [
-                    'current_price','change_24h_percent','change_24h_absolute',
-                    'high_24h','low_24h','volume_24h', 'maker_fee', 'taker_fee', 'min_order_amount', 'lot_size'
-                ]
-                return dict(zip(keys, row))
+                return row
         except Exception as e:
             logger.error(f"[TRADING] Ошибка запроса пары из БД: {e}")
         return {}
     
     def query_balance(exchange, asset):
-        asset_variants = [asset]
-        asset_upper = str(asset or '').upper()
-        asset_lower = str(asset or '').lower()
-        if asset_upper not in asset_variants:
-            asset_variants.append(asset_upper)
-        if asset_lower not in asset_variants:
-            asset_variants.append(asset_lower)
-
         try:
-            for asset_name in asset_variants:
-                db.cursor.execute(
-                    f"SELECT free, locked, total FROM {exchange}_balance "
-                    f"WHERE asset=%s",
-                    (asset_name,)
-                )
-                row = db.cursor.fetchone()
-                if row:
-                    db_balance = {
-                        'free': row[0],
-                        'locked': row[1],
-                        'total': row[2],
-                    }
-                    try:
-                        db_free = float(db_balance.get('free') or 0)
-                    except Exception:
-                        db_free = 0.0
-                    if db_free > 0:
-                        return db_balance
-                    break
+            db_balance = db.get_balance(
+                exchange,
+                asset,
+                user_id=current_user_id,
+            )
+            if db_balance:
+                return db_balance
         except Exception as e:
             logger.error(f"[TRADING] Ошибка запроса баланса из БД: {e}")
-
-        live_balances = live_balance_cache.get(exchange)
-        if live_balances is None:
-            key = exchange_key_map.get(exchange)
-            if key:
-                live_result = fetch_balance_for_exchange(
-                    exchange,
-                    key.api_key,
-                    key.secret_key,
-                    getattr(key, 'passphrase', None),
-                )
-                if live_result.get('status') == 'success':
-                    live_balances = live_result.get('assets', {})
-                    live_balance_cache[exchange] = live_balances
-                else:
-                    logger.warning(
-                        f"[TRADING] Не удалось получить live-баланс {exchange}: "
-                        f"{live_result.get('error')}"
-                    )
-                    live_balance_cache[exchange] = {}
-                    live_balances = {}
-            else:
-                live_balances = {}
-
-        for asset_name in asset_variants:
-            live_balance = live_balances.get(asset_name)
-            if live_balance:
-                return {
-                    'free': live_balance.get('free', 0),
-                    'locked': live_balance.get('used', 0),
-                    'total': live_balance.get('total', 0),
-                }
         return {}
 
     def get_effective_available_amount(balance_data):
@@ -180,23 +121,15 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         candidate_assets = []
 
         try:
-            db.cursor.execute(
-                f"SELECT asset, free FROM {exchange}_balance "
-                f"WHERE free IS NOT NULL AND free::numeric > 0"
+            balances = db.get_balances(exchange, user_id=current_user_id)
+            candidate_assets.extend(
+                (asset_name, info.get('free', 0))
+                for asset_name, info in balances.items()
             )
-            candidate_assets.extend(db.cursor.fetchall())
         except Exception as e:
             logger.error(
                 f"[TRADING] Ошибка поиска доступных активов для продажи: {e}"
             )
-
-        live_balances = live_balance_cache.get(exchange)
-        if live_balances is None:
-            query_balance(exchange, 'USDT')
-            live_balances = live_balance_cache.get(exchange, {})
-
-        for asset_name, live_info in live_balances.items():
-            candidate_assets.append((asset_name, live_info.get('free', 0)))
 
         for asset_name, free_amount in candidate_assets:
             if str(asset_name).upper() in ('USDT', 'USDC', 'BUSD', 'DAI'):
@@ -216,7 +149,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         logger.info("[TRADING] Закрытие торгового терминала")
         try:
             db.close()
-        except:
+        except Exception:
             pass
         dialog.open = False
         page.update()
@@ -249,15 +182,16 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             ft.Text(message, size=12, color=color, weight="bold"),
         ])
         status_message.bgcolor = ft.colors.with_opacity(0.1, color)
-        status_message.border = ft.border.all(1, ft.colors.with_opacity(0.3, color))
+        status_message.border = ft.border.all(
+            1,
+            ft.colors.with_opacity(0.3, color),
+        )
         status_message.visible = True
         page.update()
     
     # ==================== ЦВЕТА ====================
     BUY_COLOR = "#00C853"
     SELL_COLOR = "#FF5252"
-    INPUT_BG = "#0d0d1a"
-    
     buy_active = initial_side == "buy"
     sell_active = initial_side == "sell"
     action_color = BUY_COLOR if buy_active else SELL_COLOR
@@ -370,14 +304,19 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             min_order_label.value = f"{info.get('min_order_amount', 0)}"
             lot_size_label.value = f"{info.get('lot_size', 0)}"
         else:
-            # если в БД нет данных, можно запросить цену по API как запасной вариант
             success, curr = get_current_price(current_exchange, current_symbol, "", "")
             if success:
-                price_value.value = f"${curr.get('last',0):,.2f}"
+                price_value.value = f"${curr.get('last', 0):,.2f}"
                 change_label.value = ""
-                high_label.value = f"${curr.get('high',0):,.2f}"
-                low_label.value = f"${curr.get('low',0):,.2f}"
+                high_label.value = f"${curr.get('high', 0):,.2f}"
+                low_label.value = f"${curr.get('low', 0):,.2f}"
                 volume_label.value = ""
+            else:
+                price_value.value = "Ожидание данных"
+                change_label.value = ""
+                high_label.value = "-"
+                low_label.value = "-"
+                volume_label.value = "-"
             maker_fee_label.value = "?"
             taker_fee_label.value = "?"
             min_order_label.value = "?"

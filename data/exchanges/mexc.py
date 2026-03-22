@@ -1,6 +1,10 @@
 """MEXC Exchange API"""
 import ccxt
-from config import QUOTE_CURRENCY
+
+try:
+    from data.config import QUOTE_CURRENCY
+except ImportError:
+    from config import QUOTE_CURRENCY
 
 
 class MEXCExchange:
@@ -18,6 +22,9 @@ class MEXCExchange:
                 'apiKey': self.api_key,
                 'secret': self.api_secret,
                 'enableRateLimit': True,
+                'options': {
+                    'recvWindow': 5000,
+                },
             })
             self.ccxt_exchange.fetch_balance()
             self.is_connected = True

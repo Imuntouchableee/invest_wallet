@@ -1,6 +1,10 @@
 """GATEIO Exchange API"""
 import ccxt
-from config import QUOTE_CURRENCY
+
+try:
+    from data.config import QUOTE_CURRENCY
+except ImportError:
+    from config import QUOTE_CURRENCY
 
 
 class GateiоExchange:

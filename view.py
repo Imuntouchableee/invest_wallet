@@ -7,9 +7,11 @@ UI модули вынесены в папку ui/
 """
 import flet as ft
 import logging
+import threading
 from datetime import datetime
 
 from backend.models import User, ExchangeAPIKey, session
+from data.main import main as run_data_updater
 
 # Импорт UI модулей
 from ui.config import DARK_BG, PRIMARY_COLOR
@@ -35,6 +37,22 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+_data_updater_thread = None
+
+
+def start_data_updater():
+    global _data_updater_thread
+    if _data_updater_thread and _data_updater_thread.is_alive():
+        return
+
+    _data_updater_thread = threading.Thread(
+        target=run_data_updater,
+        name='data-updater',
+        daemon=True,
+    )
+    _data_updater_thread.start()
+    logger.info('[START] Фоновый updater данных запущен')
 
 
 def main(page: ft.Page):
@@ -156,4 +174,5 @@ def main(page: ft.Page):
 
 
 if __name__ == "__main__":
+    start_data_updater()
     ft.app(target=main)

@@ -5,7 +5,12 @@ API модуль для работы с криптобиржами
 import ccxt
 from datetime import datetime
 
+from backend.models import ExchangeAPIKey, session
 from data.database import DatabaseManager
+
+
+BYBIT_RECV_WINDOW = 5000
+STABLE_CURRENCIES = {'USDT', 'USDC', 'USD', 'BUSD', 'DAI'}
 
 
 def _safe_float(value, default=0.0):
@@ -13,6 +18,60 @@ def _safe_float(value, default=0.0):
         return float(value)
     except Exception:
         return default
+
+
+def _get_db():
+    db = DatabaseManager()
+    if not db.connect():
+        return None
+    return db
+
+
+def _get_asset_price_from_db(db: DatabaseManager, currency: str, preferred_exchange: str = None):
+    if currency in STABLE_CURRENCIES:
+        return 1.0
+
+    symbol = f"{currency}/USDT"
+    exchanges = []
+    if preferred_exchange:
+        exchanges.append(preferred_exchange)
+    exchanges.extend(exchange for exchange in ('bybit', 'gateio', 'mexc') if exchange != preferred_exchange)
+
+    for exchange in exchanges:
+        pair_info = db.get_pair_info(exchange, symbol)
+        if pair_info and pair_info.get('current_price') is not None:
+            return _safe_float(pair_info.get('current_price'))
+    return 0.0
+
+
+def _calculate_portfolio_value_from_db(db: DatabaseManager, exchange_name: str, assets: dict):
+    total_usd = 0.0
+    asset_details = []
+
+    for currency, data in assets.items():
+        amount = _safe_float(data.get('total'))
+        if amount <= 0:
+            continue
+
+        price = _get_asset_price_from_db(db, currency, preferred_exchange=exchange_name)
+        usd_value = amount * price
+        if usd_value < 0.01:
+            continue
+
+        asset_details.append({
+            'currency': currency,
+            'amount': amount,
+            'free': _safe_float(data.get('free')),
+            'used': _safe_float(data.get('locked')),
+            'price_usd': price,
+            'value_usd': usd_value,
+        })
+        total_usd += usd_value
+
+    return {
+        'total_usd': total_usd,
+        'assets': sorted(asset_details, key=lambda item: item['value_usd'], reverse=True),
+    }
 
 
 def _normalize_order_values(exchange, symbol: str, amount: float, price: float = None):
@@ -65,6 +124,33 @@ def _persist_exchange_balance(exchange_name: str, assets: dict):
         db.close()
 
 
+def _sync_exchange_clock(exchange):
+    """Синхронизирует локальное время с сервером биржи для signed-запросов."""
+    try:
+        exchange.load_time_difference()
+    except Exception:
+        pass
+    return exchange
+
+
+def _create_bybit_exchange(api_key: str = None, secret_key: str = None):
+    config = {
+        'enableRateLimit': True,
+        'options': {
+            'recvWindow': BYBIT_RECV_WINDOW,
+            'adjustForTimeDifference': True,
+            'defaultType': 'spot',
+        },
+    }
+    if api_key:
+        config['apiKey'] = api_key
+    if secret_key:
+        config['secret'] = secret_key
+
+    exchange = ccxt.bybit(config)
+    return _sync_exchange_clock(exchange)
+
+
 def get_exchange_instance(exchange_name: str, api_key: str, secret_key: str, passphrase: str = None):
     """
     Создает экземпляр биржи с авторизацией
@@ -74,17 +160,17 @@ def get_exchange_instance(exchange_name: str, api_key: str, secret_key: str, pas
         'secret': secret_key,
         'enableRateLimit': True,
         'options': {
-            'recvWindow': 120000,
             'adjustForTimeDifference': True,
             'defaultType': 'spot',
         },
     }
 
     if exchange_name == 'bybit':
-        exchange = ccxt.bybit(config)
+        exchange = _create_bybit_exchange(api_key, secret_key)
     elif exchange_name == 'gateio':
         exchange = ccxt.gateio(config)
     elif exchange_name == 'mexc':
+        config['options']['recvWindow'] = 5000
         exchange = ccxt.mexc(config)
     else:
         raise ValueError(f"Неизвестная биржа: {exchange_name}")
@@ -115,42 +201,53 @@ def test_exchange_connection(exchange_name: str, api_key: str, secret_key: str, 
 
 def fetch_balance_for_exchange(exchange_name: str, api_key: str, secret_key: str, passphrase: str = None):
     """
-    Получает баланс с одной биржи
+    Получает баланс с одной биржи из локальной БД
     Возвращает словарь с активами
     """
-    try:
-        exchange = get_exchange_instance(exchange_name, api_key, secret_key, passphrase)
-        balance = exchange.fetch_balance()
-        
-        # Фильтруем ненулевые балансы
-        assets = {}
-        for currency, data in balance.items():
-            if isinstance(data, dict) and data.get('total', 0) > 0:
-                free_value = float(data.get('free', 0) or 0)
-                used_value = float(data.get('used', 0) or 0)
-                total_value = float(data.get('total', 0) or 0)
-
-                if free_value <= 0 and total_value > 0 and used_value <= 0:
-                    free_value = total_value
-
-                assets[currency] = {
-                    'free': free_value,
-                    'used': used_value,
-                    'total': total_value,
-                }
-        
-        return {
-            'status': 'success',
-            'assets': assets,
-            'error': None,
-            'timestamp': datetime.now(),
-        }
-        
-    except ccxt.AuthenticationError:
+    db = _get_db()
+    if not db:
         return {
             'status': 'error',
             'assets': {},
-            'error': 'Ошибка авторизации',
+            'error': 'Не удалось подключиться к базе данных',
+            'timestamp': datetime.now(),
+        }
+
+    try:
+        key = session.query(ExchangeAPIKey).filter_by(
+            exchange_name=exchange_name,
+            api_key=api_key,
+            secret_key=secret_key,
+            is_active=True,
+        ).first()
+        if not key:
+            return {
+                'status': 'error',
+                'assets': {},
+                'error': 'Для этих ключей нет сохраненного баланса в базе данных',
+                'timestamp': datetime.now(),
+            }
+
+        assets = db.get_balances(exchange_name, user_id=key.user_id)
+        if not assets:
+            return {
+                'status': 'error',
+                'assets': {},
+                'error': 'Баланс еще не синхронизирован в базу данных',
+                'timestamp': datetime.now(),
+            }
+
+        return {
+            'status': 'success',
+            'assets': {
+                currency: {
+                    'free': data.get('free', 0),
+                    'used': data.get('locked', 0),
+                    'total': data.get('total', 0),
+                }
+                for currency, data in assets.items()
+            },
+            'error': None,
             'timestamp': datetime.now(),
         }
     except Exception as e:
@@ -160,89 +257,36 @@ def fetch_balance_for_exchange(exchange_name: str, api_key: str, secret_key: str
             'error': str(e)[:100],
             'timestamp': datetime.now(),
         }
+    finally:
+        db.close()
 
 
 def get_asset_price_usd(currency: str, exchange=None):
     """
     Получает цену актива в USD
     """
-    if currency in ['USDT', 'USDC', 'USD', 'BUSD', 'DAI']:
-        return 1.0
-    
+    db = _get_db()
+    if not db:
+        return 0.0
+
     try:
-        if exchange is None:
-            exchange = ccxt.bybit({
-                'enableRateLimit': True,
-                'options': {
-                    'recvWindow': 120000,
-                    'adjustForTimeDifference': True,
-                    'defaultType': 'spot',
-                }
-            })
-            try:
-                exchange.load_markets()
-            except:
-                pass
-        
-        # Пробуем разные пары
-        for quote in ['USDT', 'USDC', 'USD']:
-            try:
-                ticker = exchange.fetch_ticker(f"{currency}/{quote}")
-                return ticker['last']
-            except:
-                continue
-        return 0.0
-    except:
-        return 0.0
+        return _get_asset_price_from_db(db, currency)
+    finally:
+        db.close()
 
 
 def calculate_portfolio_value(assets: dict, exchange=None):
     """
     Рассчитывает общую стоимость портфеля в USD
     """
-    if exchange is None:
-        exchange = ccxt.bybit({
-            'enableRateLimit': True,
-            'options': {
-                'recvWindow': 120000,
-                'adjustForTimeDifference': True,
-                'defaultType': 'spot',
-            }
-        })
-        try:
-            exchange.load_markets()
-        except:
-            pass
-    
-    total_usd = 0.0
-    asset_details = []
-    
-    for currency, data in assets.items():
-        if currency in ['info', 'timestamp', 'datetime', 'free', 'used', 'total']:
-            continue
-        
-        amount = data['total']
-        if amount <= 0:
-            continue
-        
-        price = get_asset_price_usd(currency, exchange)
-        usd_value = amount * price
-        
-        if usd_value >= 0.01:  # Игнорируем пыль
-            asset_details.append({
-                'currency': currency,
-                'amount': amount,
-                'free': data['free'],
-                'used': data['used'],
-                'price_usd': price,
-                'value_usd': usd_value,
-            })
-            total_usd += usd_value
-    
-    return {
-        'total_usd': total_usd,
-        'assets': sorted(asset_details, key=lambda x: x['value_usd'], reverse=True),
-    }
+    db = _get_db()
+    if not db:
+        return {'total_usd': 0.0, 'assets': []}
+
+    try:
+        return _calculate_portfolio_value_from_db(db, 'bybit', assets)
+    finally:
+        db.close()
 
 
 def fetch_user_portfolio(user_exchange_keys: list):
@@ -257,108 +301,79 @@ def fetch_user_portfolio(user_exchange_keys: list):
         'all_assets': [],
         'timestamp': datetime.now(),
     }
+    db = _get_db()
+    if not db:
+        for key in user_exchange_keys:
+            if key.is_active:
+                portfolio['exchanges'][key.exchange_name] = {
+                    'status': 'error',
+                    'error': 'Не удалось подключиться к базе данных',
+                    'total_usd': 0,
+                    'assets': [],
+                    'asset_count': 0,
+                }
+        return portfolio
     
-    price_exchange = ccxt.bybit({
-        'enableRateLimit': True,
-        'options': {
-            'recvWindow': 120000,
-            'adjustForTimeDifference': True,
-            'defaultType': 'spot',
-        }
-    })
     try:
-        price_exchange.load_markets()
-    except:
-        pass
-    
-    for key in user_exchange_keys:
-        if not key.is_active:
-            continue
-        
-        exchange_name = key.exchange_name
-        
-        # Получаем баланс
-        balance_data = fetch_balance_for_exchange(
-            exchange_name,
-            key.api_key,
-            key.secret_key,
-            key.passphrase
-        )
-        
-        if balance_data['status'] == 'success':
-            _persist_exchange_balance(exchange_name, balance_data['assets'])
+        for key in user_exchange_keys:
+            if not key.is_active:
+                continue
 
-            # Рассчитываем стоимость
-            calc = calculate_portfolio_value(balance_data['assets'], price_exchange)
-            
+            exchange_name = key.exchange_name
+            balances = db.get_balances(exchange_name, user_id=key.user_id)
+            latest_pairs_update = db.get_latest_pairs_update(exchange_name)
+            latest_balance_update = db.get_latest_balance_update(exchange_name, user_id=key.user_id)
+
+            if not balances:
+                portfolio['exchanges'][exchange_name] = {
+                    'status': 'loading',
+                    'error': 'Идет синхронизация данных из базы данных',
+                    'total_usd': 0,
+                    'assets': [],
+                    'asset_count': 0,
+                    'last_pairs_update': latest_pairs_update,
+                    'last_balance_update': latest_balance_update,
+                }
+                continue
+
+            calc = _calculate_portfolio_value_from_db(db, exchange_name, balances)
             portfolio['exchanges'][exchange_name] = {
                 'status': 'success',
                 'total_usd': calc['total_usd'],
                 'assets': calc['assets'],
                 'asset_count': len(calc['assets']),
+                'last_pairs_update': latest_pairs_update,
+                'last_balance_update': latest_balance_update,
             }
-            
+
             portfolio['total_usd'] += calc['total_usd']
-            
-            # Добавляем в общий список с указанием биржи
+
             for asset in calc['assets']:
                 asset['exchange'] = exchange_name
                 portfolio['all_assets'].append(asset)
-        else:
-            portfolio['exchanges'][exchange_name] = {
-                'status': 'error',
-                'error': balance_data['error'],
-                'total_usd': 0,
-                'assets': [],
-                'asset_count': 0,
-            }
-    
-    # Сортируем общий список по стоимости
-    portfolio['all_assets'] = sorted(portfolio['all_assets'], key=lambda x: x['value_usd'], reverse=True)
-    
-    return portfolio
+
+        portfolio['all_assets'] = sorted(
+            portfolio['all_assets'],
+            key=lambda item: item['value_usd'],
+            reverse=True,
+        )
+        return portfolio
+    finally:
+        db.close()
 
 
 def fetch_coin_prices(coin_name: str):
     """
     Получает цены монеты на всех биржах
     """
-    bybit_exchange = ccxt.bybit({
-        'enableRateLimit': True,
-        'options': {
-            'recvWindow': 120000,
-            'adjustForTimeDifference': True,
-            'defaultType': 'spot',
-        }
-    })
+    db = _get_db()
+    if not db:
+        return {'bybit': None, 'gateio': None, 'mexc': None}
+
     try:
-        bybit_exchange.load_markets()
-    except:
-        pass
-    
-    exchanges = {
-        'bybit': bybit_exchange,
-        'gateio': ccxt.gateio(),
-        'mexc': ccxt.mexc(),
-    }
-    
-    prices = {}
-    symbol = f"{coin_name.upper()}/USDT"
-    
-    for name, exchange in exchanges.items():
-        try:
-            ticker = exchange.fetch_ticker(symbol)
-            prices[name] = {
-                'price': ticker['last'],
-                'change_24h': ticker.get('percentage', 0),
-                'high_24h': ticker.get('high', 0),
-                'low_24h': ticker.get('low', 0),
-                'volume_24h': ticker.get('quoteVolume', 0),
-            }
-        except:
-            prices[name] = None
-    
-    return prices
+        return db.get_coin_prices(coin_name)
+    finally:
+        db.close()
 
 
 def get_available_trading_pairs(exchange_name: str, api_key: str, secret_key: str, passphrase: str = None):
@@ -366,41 +381,43 @@ def get_available_trading_pairs(exchange_name: str, api_key: str, secret_key: st
     Получает список доступных торговых пар на бирже
     Возвращает отсортированный список пар /USDT
     """
+    db = _get_db()
+    if not db:
+        return False, 'Ошибка подключения к базе данных'
+
     try:
-        exchange = get_exchange_instance(exchange_name, api_key, secret_key, passphrase)
-        exchange.load_markets()
-        
-        # Фильтруем только пары USDT и сортируем по алфавиту
-        usdt_pairs = []
-        for symbol in exchange.symbols:
-            if symbol.endswith('USDT'):
-                # Проверяем что пара активна для торговли
-                market = exchange.markets.get(symbol, {})
-                if market.get('active', True):
-                    usdt_pairs.append(symbol)
-        
-        # Сортируем по алфавиту и возвращаем до 100 пар
-        return True, sorted(usdt_pairs)[:100]
+        pairs = db.get_pairs(exchange_name)
+        return True, pairs[:100]
     except Exception as e:
         return False, f"Ошибка получения пар: {str(e)[:100]}"
+    finally:
+        db.close()
 
 
 def get_current_price(exchange_name: str, symbol: str, api_key: str, secret_key: str, passphrase: str = None):
     """
     Получает текущую цену для символа
     """
+    db = _get_db()
+    if not db:
+        return False, 'Ошибка подключения к базе данных'
+
     try:
-        exchange = get_exchange_instance(exchange_name, api_key, secret_key, passphrase)
-        ticker = exchange.fetch_ticker(symbol)
+        ticker = db.get_pair_info(exchange_name, symbol)
+        if not ticker:
+            return False, f"Цена для {symbol} еще не загружена в базу данных"
         return True, {
-            'last': ticker.get('last', 0),
-            'bid': ticker.get('bid', 0),
-            'ask': ticker.get('ask', 0),
-            'high': ticker.get('high', 0),
-            'low': ticker.get('low', 0),
+            'last': _safe_float(ticker.get('current_price')),
+            'bid': _safe_float((ticker.get('bid_price') or [0])[0] if ticker.get('bid_price') else 0),
+            'ask': _safe_float((ticker.get('ask_price') or [0])[0] if ticker.get('ask_price') else 0),
+            'high': _safe_float(ticker.get('high_24h')),
+            'low': _safe_float(ticker.get('low_24h')),
+            'updated_at': ticker.get('updated_at'),
         }
     except Exception as e:
         return False, f"Ошибка получения цены: {str(e)[:100]}"
+    finally:
+        db.close()
 
 
 def create_order(exchange_name: str, symbol: str, side: str, order_type: str, amount: float, 

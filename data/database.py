@@ -1,8 +1,7 @@
 """Работа с базой данных PostgreSQL"""
 import psycopg2
-import pandas as pd
 from psycopg2.extras import Json, execute_values
-# импортируем конфиг из пакета data
+
 from data.config import DATABASE
 
 
@@ -22,10 +21,10 @@ class DatabaseManager:
                 password=DATABASE['password']
             )
             self.cursor = self.conn.cursor()
-            print("✓ Подключение к БД успешно")
+            print("DB connection successful")
             return True
         except Exception as e:
-            print(f"✗ Ошибка подключения к БД: {e}")
+            print(f"DB connection error: {e}")
             return False
     
     def close(self):
@@ -121,11 +120,13 @@ class DatabaseManager:
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS mexc_balance (
                     id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
                     asset VARCHAR(50),
                     free DECIMAL(20, 8),
                     locked DECIMAL(20, 8),
                     total DECIMAL(20, 8),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             
@@ -133,11 +134,13 @@ class DatabaseManager:
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bybit_balance (
                     id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
                     asset VARCHAR(50),
                     free DECIMAL(20, 8),
                     locked DECIMAL(20, 8),
                     total DECIMAL(20, 8),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             
@@ -145,34 +148,26 @@ class DatabaseManager:
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS gateio_balance (
                     id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
                     asset VARCHAR(50),
                     free DECIMAL(20, 8),
                     locked DECIMAL(20, 8),
                     total DECIMAL(20, 8),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
 
-            # Таблица исторических OHLCV-свечей для ML-прогнозирования
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS price_history (
-                    id SERIAL PRIMARY KEY,
-                    symbol VARCHAR(100) NOT NULL,
-                    timestamp TIMESTAMP NOT NULL,
-                    open DECIMAL(20, 8),
-                    high DECIMAL(20, 8),
-                    low DECIMAL(20, 8),
-                    close DECIMAL(20, 8),
-                    volume DECIMAL(30, 8),
-                    UNIQUE(symbol, timestamp)
-                )
-            """)
-            
+            self._ensure_balance_schema('mexc_balance')
+            self._ensure_balance_schema('bybit_balance')
+            self._ensure_balance_schema('gateio_balance')
+
             self.conn.commit()
-            print("✓ Таблицы созданы/проверены")
+            print("Tables created/checked")
             return True
         except Exception as e:
-            print(f"✗ Ошибка создания таблиц: {e}")
+            self.conn.rollback()
+            print(f"Table creation error: {e}")
             return False
 
     def _ensure_pairs_schema(self, table_name):
@@ -202,12 +197,27 @@ class DatabaseManager:
                 f"SET {column_name} = '[]'::jsonb "
                 f"WHERE {column_name} IS NULL"
             )
+
+    def _ensure_balance_schema(self, table_name):
+        """Приводит схему таблиц баланса к актуальному виду."""
+        self.cursor.execute(
+            f"ALTER TABLE {table_name} "
+            f"ADD COLUMN IF NOT EXISTS user_id INTEGER"
+        )
+        self.cursor.execute(
+            f"ALTER TABLE {table_name} "
+            f"ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        )
+        self.cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table_name}_user_asset "
+            f"ON {table_name} (user_id, asset)"
+        )
     
     def save_pairs(self, exchange, pairs_data):
         """Сохранение данных по парам в БД"""
         try:
             table_name = f'{exchange}_pairs'
-            print(f"  💾 Сохраняю пары в БД...", end=' ')
+            print("  Saving pairs to DB...", end=' ')
             
             values = []
             for symbol, data in pairs_data.items():
@@ -260,23 +270,33 @@ class DatabaseManager:
                     """,
                     values
                 )
-                self.conn.commit()
-                print(f"✓ {len(pairs_data)} пар сохранено")
+            self.conn.commit()
+            if values:
+                print(f"OK: {len(pairs_data)} pairs saved")
         except Exception as e:
-            print(f"✗ Ошибка сохранения: {e}")
+            self.conn.rollback()
+            print(f"Save error: {e}")
     
-    def save_balance(self, exchange, balance_data):
+    def save_balance(self, exchange, balance_data, user_id=None):
         """Сохранение баланса в БД"""
         try:
             table_name = f'{exchange}_balance'
-            print(f"  💾 Сохраняю баланс в БД...", end=' ')
+            print("  Saving balance to DB...", end=' ')
             
-            # Очистка старых записей
-            self.cursor.execute(f"DELETE FROM {table_name}")
+            if user_id is None:
+                self.cursor.execute(
+                    f"DELETE FROM {table_name} WHERE user_id IS NULL"
+                )
+            else:
+                self.cursor.execute(
+                    f"DELETE FROM {table_name} WHERE user_id = %s",
+                    (user_id,),
+                )
             
             values = []
             for asset, data in balance_data.items():
                 values.append((
+                    user_id,
                     asset,
                     data.get('free'),
                     data.get('locked'),
@@ -287,73 +307,136 @@ class DatabaseManager:
                 execute_values(
                     self.cursor,
                     f"""
-                    INSERT INTO {table_name} (asset, free, locked, total)
+                    INSERT INTO {table_name} (user_id, asset, free, locked, total, updated_at)
                     VALUES %s
-                    """,
-                    values
-                )
-                self.conn.commit()
-                print(f"✓ {len(balance_data)} активов сохранено")
-        except Exception as e:
-            print(f"✗ Ошибка сохранения: {e}")
-
-    def save_price_history(self, symbol, df):
-        """Сохранение OHLCV-данных в таблицу price_history."""
-        try:
-            values = []
-            for _, row in df.iterrows():
-                values.append((
-                    symbol,
-                    row['Date'],
-                    float(row['Open']),
-                    float(row['High']),
-                    float(row['Low']),
-                    float(row['Close']),
-                    float(row['Volume']),
-                ))
-
-            if values:
-                execute_values(
-                    self.cursor,
-                    """
-                    INSERT INTO price_history
-                        (symbol, timestamp, open, high, low, close, volume)
-                    VALUES %s
-                    ON CONFLICT (symbol, timestamp) DO UPDATE SET
-                        open   = EXCLUDED.open,
-                        high   = EXCLUDED.high,
-                        low    = EXCLUDED.low,
-                        close  = EXCLUDED.close,
-                        volume = EXCLUDED.volume
                     """,
                     values,
+                    template="(%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)"
                 )
-                self.conn.commit()
-                print(f"✓ price_history: {len(values)} свечей для {symbol}")
+            self.conn.commit()
+            if values:
+                print(f"OK: {len(balance_data)} assets saved")
         except Exception as e:
-            print(f"✗ Ошибка сохранения price_history: {e}")
+            self.conn.rollback()
+            print(f"Save error: {e}")
 
-    def load_price_history(self, symbol):
-        """Загрузка OHLCV-данных из таблицы price_history."""
-        try:
+    def get_pairs(self, exchange):
+        """Возвращает список торговых пар биржи."""
+        table_name = f'{exchange}_pairs'
+        self.cursor.execute(
+            f"SELECT symbol FROM {table_name} ORDER BY symbol"
+        )
+        return [row[0] for row in self.cursor.fetchall()]
+
+    def get_pair_info(self, exchange, symbol):
+        """Возвращает информацию по торговой паре."""
+        table_name = f'{exchange}_pairs'
+        self.cursor.execute(
+            f"""
+            SELECT symbol, current_price, change_24h_percent, change_24h_absolute,
+                   high_24h, low_24h, volume_24h, maker_fee, taker_fee,
+                   min_order_amount, lot_size, ask_price, ask_volume,
+                   bid_price, bid_volume, quotes_1h, updated_at
+            FROM {table_name}
+            WHERE symbol = %s
+            """,
+            (symbol,),
+        )
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+
+        keys = [
+            'symbol', 'current_price', 'change_24h_percent', 'change_24h_absolute',
+            'high_24h', 'low_24h', 'volume_24h', 'maker_fee', 'taker_fee',
+            'min_order_amount', 'lot_size', 'ask_price', 'ask_volume',
+            'bid_price', 'bid_volume', 'quotes_1h', 'updated_at'
+        ]
+        return dict(zip(keys, row))
+
+    def get_coin_prices(self, coin_name):
+        """Возвращает цены монеты на всех биржах из БД."""
+        result = {}
+        symbol = f"{coin_name.upper()}/USDT"
+        for exchange in ('bybit', 'gateio', 'mexc'):
+            pair_info = self.get_pair_info(exchange, symbol)
+            if pair_info:
+                result[exchange] = {
+                    'price': float(pair_info.get('current_price') or 0),
+                    'change_24h': float(pair_info.get('change_24h_percent') or 0),
+                    'high_24h': float(pair_info.get('high_24h') or 0),
+                    'low_24h': float(pair_info.get('low_24h') or 0),
+                    'volume_24h': float(pair_info.get('volume_24h') or 0),
+                    'updated_at': pair_info.get('updated_at'),
+                }
+            else:
+                result[exchange] = None
+        return result
+
+    def get_balances(self, exchange, user_id=None):
+        """Возвращает все балансы пользователя для указанной биржи."""
+        table_name = f'{exchange}_balance'
+        if user_id is None:
             self.cursor.execute(
+                f"""
+                SELECT asset, free, locked, total, COALESCE(updated_at, created_at)
+                FROM {table_name}
+                WHERE user_id IS NULL
+                ORDER BY asset
                 """
-                SELECT timestamp, open, high, low, close, volume
-                FROM price_history
-                WHERE symbol = %s
-                ORDER BY timestamp ASC
+            )
+        else:
+            self.cursor.execute(
+                f"""
+                SELECT asset, free, locked, total, COALESCE(updated_at, created_at)
+                FROM {table_name}
+                WHERE user_id = %s
+                ORDER BY asset
                 """,
-                (symbol,),
+                (user_id,),
             )
-            rows = self.cursor.fetchall()
-            if not rows:
-                return pd.DataFrame()
 
-            df = pd.DataFrame(
-                rows,
-                columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'],
+        rows = self.cursor.fetchall()
+        balances = {}
+        for asset, free, locked, total, updated_at in rows:
+            balances[asset] = {
+                'free': float(free or 0),
+                'locked': float(locked or 0),
+                'total': float(total or 0),
+                'updated_at': updated_at,
+            }
+        return balances
+
+    def get_balance(self, exchange, asset, user_id=None):
+        """Возвращает баланс конкретного актива пользователя."""
+        balances = self.get_balances(exchange, user_id=user_id)
+        asset_upper = str(asset or '').upper()
+        for asset_name, balance in balances.items():
+            if str(asset_name).upper() == asset_upper:
+                return balance
+        return None
+
+    def get_latest_pairs_update(self, exchange):
+        """Возвращает время последнего обновления цен по бирже."""
+        table_name = f'{exchange}_pairs'
+        self.cursor.execute(
+            f"SELECT MAX(updated_at) FROM {table_name}"
+        )
+        row = self.cursor.fetchone()
+        return row[0] if row else None
+
+    def get_latest_balance_update(self, exchange, user_id=None):
+        """Возвращает время последнего обновления баланса пользователя."""
+        table_name = f'{exchange}_balance'
+        if user_id is None:
+            self.cursor.execute(
+                f"SELECT MAX(COALESCE(updated_at, created_at)) FROM {table_name} WHERE user_id IS NULL"
             )
-            return df
-        except Exception as e:
-            print(f"✗ Ошибка чтения price_history: {e}")
-            return pd.DataFrame()
+        else:
+            self.cursor.execute(
+                f"SELECT MAX(COALESCE(updated_at, created_at)) FROM {table_name} WHERE user_id = %s",
+                (user_id,),
+            )
+        row = self.cursor.fetchone()
+        return row[0] if row else None
+

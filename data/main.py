@@ -1,9 +1,179 @@
-"""Главный скрипт для сбора данных с бирж"""
-from config import EXCHANGES
-from database import DatabaseManager
-from exchanges.mexc import MEXCExchange
-from exchanges.bybit import BybitExchange
-from exchanges.gateio import GateiоExchange
+"""Главный скрипт для сбора данных с бирж."""
+import logging
+import time
+from datetime import datetime
+
+try:
+    from data.config import EXCHANGES
+    from data.database import DatabaseManager
+    from data.exchanges.mexc import MEXCExchange
+    from data.exchanges.bybit import BybitExchange
+    from data.exchanges.gateio import GateiоExchange
+except ImportError:
+    from config import EXCHANGES
+    from database import DatabaseManager
+    from exchanges.mexc import MEXCExchange
+    from exchanges.bybit import BybitExchange
+    from exchanges.gateio import GateiоExchange
+
+from backend.models import ExchangeAPIKey, SessionLocal
+
+
+logger = logging.getLogger(__name__)
+REFRESH_INTERVAL_SECONDS = 10
+STABLE_CURRENCIES = {'USDT', 'USDC', 'USD', 'BUSD', 'DAI'}
+
+
+def _create_exchange_client(exchange_name, api_key, api_secret):
+    if exchange_name == 'mexc':
+        return MEXCExchange(api_key, api_secret)
+    if exchange_name == 'bybit':
+        return BybitExchange(api_key, api_secret)
+    if exchange_name == 'gateio':
+        return GateiоExchange(api_key, api_secret)
+    raise ValueError(f'Неизвестная биржа: {exchange_name}')
+
+
+def _load_active_user_keys():
+    db_session = SessionLocal()
+    try:
+        keys = db_session.query(ExchangeAPIKey).filter_by(is_active=True).all()
+        return [
+            {
+                'id': key.id,
+                'user_id': key.user_id,
+                'exchange_name': key.exchange_name,
+                'api_key': key.api_key,
+                'secret_key': key.secret_key,
+                'passphrase': key.passphrase,
+            }
+            for key in keys
+        ]
+    finally:
+        db_session.close()
+
+
+def _update_last_sync(key_id):
+    db_session = SessionLocal()
+    try:
+        key = db_session.get(ExchangeAPIKey, key_id)
+        if key:
+            key.last_sync = datetime.now()
+            db_session.commit()
+    except Exception as e:
+        logger.error(
+            f"[DATA] Не удалось обновить last_sync "
+            f"для ключа {key_id}: {e}"
+        )
+        db_session.rollback()
+    finally:
+        db_session.close()
+
+
+def _sync_user_balances(db: DatabaseManager):
+    tracked_symbols = set()
+    active_keys = _load_active_user_keys()
+
+    for key in active_keys:
+        exchange_name = key['exchange_name']
+        try:
+            client = _create_exchange_client(
+                exchange_name,
+                key['api_key'],
+                key['secret_key'],
+            )
+            if not client.connect():
+                logger.warning(
+                    f"[DATA] Не удалось подключиться к {exchange_name} "
+                    f"для user_id={key['user_id']}"
+                )
+                continue
+
+            balance = client.get_balance()
+            if not balance:
+                logger.warning(
+                    f"[DATA] Пустой баланс {exchange_name} "
+                    f"для user_id={key['user_id']}"
+                )
+                continue
+
+            db.save_balance(exchange_name, balance, user_id=key['user_id'])
+            _update_last_sync(key['id'])
+
+            for asset in balance.keys():
+                asset_name = str(asset).upper()
+                if asset_name not in STABLE_CURRENCIES:
+                    tracked_symbols.add(f"{asset_name}/USDT")
+        except Exception as e:
+            logger.error(
+                f"[DATA] Ошибка синхронизации баланса {exchange_name} "
+                f"для user_id={key['user_id']}: {e}"
+            )
+
+    return tracked_symbols
+
+
+def _create_market_clients():
+    return {
+        'mexc': MEXCExchange(
+            EXCHANGES['mexc']['api_key'],
+            EXCHANGES['mexc']['api_secret'],
+        ),
+        'bybit': BybitExchange(
+            EXCHANGES['bybit']['api_key'],
+            EXCHANGES['bybit']['api_secret'],
+        ),
+        'gateio': GateiоExchange(
+            EXCHANGES['gateio']['api_key'],
+            EXCHANGES['gateio']['api_secret'],
+        ),
+    }
+
+
+def _connect_market_clients(clients):
+    for name, client in clients.items():
+        if not client.connect():
+            logger.error(f"[DATA] Не удалось подключить market-клиент {name}")
+            return False
+    return True
+
+
+def _sync_pairs(db: DatabaseManager, tracked_symbols=None):
+    clients = _create_market_clients()
+    if not _connect_market_clients(clients):
+        return False
+
+    top_symbols = set(
+        get_top_20_common_symbols(
+            clients['mexc'],
+            clients['bybit'],
+            clients['gateio'],
+        )
+    )
+    tracked_symbols = set(tracked_symbols or [])
+    symbols_to_sync = sorted(top_symbols | tracked_symbols)
+
+    if not symbols_to_sync:
+        logger.warning('[DATA] Нет символов для синхронизации пар')
+        return False
+
+    logger.info(
+        f"[DATA] Синхронизация {len(symbols_to_sync)} символов "
+        f"по всем биржам"
+    )
+
+    for exchange_name, client in clients.items():
+        try:
+            pairs = client.get_usdt_pairs(symbols=symbols_to_sync)
+            if pairs:
+                db.save_pairs(exchange_name, pairs)
+            else:
+                logger.warning(f"[DATA] Биржа {exchange_name} не вернула пары")
+        except Exception as e:
+            logger.error(
+                f"[DATA] Ошибка синхронизации пар для {exchange_name}: {e}"
+            )
+    return True
 
 
 def get_top_20_common_symbols(mexc, bybit, gateio):
@@ -78,67 +248,28 @@ def get_top_20_common_symbols(mexc, bybit, gateio):
 
 
 def main():
-    print("\n" + "="*60)
-    print("🚀 ЗАПУСК СБОРА ДАННЫХ ПО КРИПТОВАЛЮТАМ")
-    print("="*60 + "\n")
-    
-    # Инициализация БД
-    print("🗄️  ПОДКЛЮЧЕНИЕ К БД")
-    db = DatabaseManager()
-    if not db.connect():
-        return
-    
-    db.create_tables()
-    
-    # Инициализация бирж
-    print("\n🔗 ПОДКЛЮЧЕНИЕ К БИРЖАМ")
-    mexc = MEXCExchange(EXCHANGES['mexc']['api_key'], EXCHANGES['mexc']['api_secret'])
-    bybit = BybitExchange(EXCHANGES['bybit']['api_key'], EXCHANGES['bybit']['api_secret'])
-    gateio = GateiоExchange(EXCHANGES['gateio']['api_key'], EXCHANGES['gateio']['api_secret'])
-    
-    if not mexc.connect() or not bybit.connect() or not gateio.connect():
-        return
-    
-    # Получаем топ 20 общих пар
-    top_20_symbols = get_top_20_common_symbols(mexc, bybit, gateio)
-    
-    # MEXC
-    print("\n" + "="*60)
-    print("📊 MEXC")
-    print("="*60)
-    pairs = mexc.get_usdt_pairs(symbols=top_20_symbols)
-    if pairs:
-        db.save_pairs('mexc', pairs)
-    balance = mexc.get_balance()
-    if balance:
-        db.save_balance('mexc', balance)
-    
-    # BYBIT
-    print("\n" + "="*60)
-    print("📊 BYBIT")
-    print("="*60)
-    pairs = bybit.get_usdt_pairs(symbols=top_20_symbols)
-    if pairs:
-        db.save_pairs('bybit', pairs)
-    balance = bybit.get_balance()
-    if balance:
-        db.save_balance('bybit', balance)
-    
-    # GATEIO
-    print("\n" + "="*60)
-    print("📊 GATEIO")
-    print("="*60)
-    pairs = gateio.get_usdt_pairs(symbols=top_20_symbols)
-    if pairs:
-        db.save_pairs('gateio', pairs)
-    balance = gateio.get_balance()
-    if balance:
-        db.save_balance('gateio', balance)
-    
-    db.close()
-    print("\n" + "="*60)
-    print("✅ ГОТОВО")
-    print("="*60 + "\n")
+    logger.info('[DATA] Запуск фонового обновления данных')
+
+    while True:
+        db = DatabaseManager()
+        if not db.connect():
+            logger.error(
+                '[DATA] Не удалось подключиться к БД, повтор через 10 секунд'
+            )
+            time.sleep(REFRESH_INTERVAL_SECONDS)
+            continue
+
+        try:
+            db.create_tables()
+            tracked_symbols = _sync_user_balances(db)
+            _sync_pairs(db, tracked_symbols=tracked_symbols)
+            logger.info('[DATA] Цикл синхронизации завершен')
+        except Exception as e:
+            logger.exception(f'[DATA] Ошибка цикла синхронизации: {e}')
+        finally:
+            db.close()
+
+        time.sleep(REFRESH_INTERVAL_SECONDS)
 
 
 if __name__ == '__main__':
