@@ -18,6 +18,7 @@ from backend.api import fetch_user_portfolio
 from backend.decision_quality_analyzer import (
     format_exchange_name,
     get_user_decision_quality_summary,
+    get_user_trade_decision_history,
 )
 from backend.stress_sell_analyzer import analyze_portfolio_stress_sell
 
@@ -217,7 +218,19 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
         weight="bold",
         color=ACCENT_COLOR,
     )
+    decision_month_loss_text = ft.Text(
+        "$0.00",
+        size=20,
+        weight="bold",
+        color=ACCENT_COLOR,
+    )
     decision_worst_exchange_text = ft.Text(
+        "Нет данных",
+        size=18,
+        weight="bold",
+        color=TEXT_PRIMARY,
+    )
+    decision_worst_buy_exchange_text = ft.Text(
         "Нет данных",
         size=18,
         weight="bold",
@@ -229,11 +242,35 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
         weight="bold",
         color=TEXT_PRIMARY,
     )
+    decision_best_price_rate_text = ft.Text(
+        "0%",
+        size=18,
+        weight="bold",
+        color=PRIMARY_COLOR,
+    )
+    decision_liquidity_rate_text = ft.Text(
+        "0%",
+        size=18,
+        weight="bold",
+        color=SECONDARY_COLOR,
+    )
+    decision_suboptimal_rate_text = ft.Text(
+        "0%",
+        size=18,
+        weight="bold",
+        color=WARNING_COLOR,
+    )
     decision_hint_text = ft.Text(
         "История решений появится после сделок",
         size=11,
         color=TEXT_SECONDARY,
     )
+    decision_history_caption_text = ft.Text(
+        "Последние сделки будут видны после первых ордеров",
+        size=11,
+        color=TEXT_SECONDARY,
+    )
+    decision_history_rows = ft.Column(spacing=8, scroll="adaptive", expand=True)
     sync_status_text = ft.Text(
         "Синхронизация активна",
         size=9,
@@ -311,6 +348,135 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                 ft.Container(height=4),
                 subtitle,
             ], spacing=0),
+        )
+
+    def create_decision_signal(title: str, value_control, subtitle: str, accent_color: str):
+        return ft.Container(
+            expand=True,
+            padding=ft.padding.symmetric(horizontal=16, vertical=14),
+            border_radius=16,
+            bgcolor=ft.colors.with_opacity(0.14, "#0b1118"),
+            border=ft.border.all(
+                1,
+                ft.colors.with_opacity(0.30, BORDER_COLOR),
+            ),
+            content=ft.Row([
+                ft.Container(
+                    width=4,
+                    border_radius=999,
+                    bgcolor=accent_color,
+                ),
+                ft.Container(width=14),
+                ft.Column([
+                    ft.Text(
+                        title,
+                        size=10,
+                        weight="bold",
+                        color=TEXT_SECONDARY,
+                    ),
+                    ft.Container(height=6),
+                    ft.Text(
+                        subtitle,
+                        size=10,
+                        color=TEXT_SECONDARY,
+                    ),
+                ], spacing=0, expand=True, alignment=ft.MainAxisAlignment.CENTER),
+                ft.Container(width=16),
+                ft.Container(
+                    width=92,
+                    height=52,
+                    border_radius=14,
+                    bgcolor=ft.colors.with_opacity(0.10, accent_color),
+                    border=ft.border.all(
+                        1,
+                        ft.colors.with_opacity(0.24, accent_color),
+                    ),
+                    alignment=ft.alignment.center,
+                    content=value_control,
+                ),
+            ], spacing=0, vertical_alignment="center"),
+        )
+
+    def create_decision_history_row(row_data: dict):
+        status_positive = row_data.get('avoidable_loss', 0.0) <= 0.01
+        status_color = SUCCESS_COLOR if status_positive else ACCENT_COLOR
+        return ft.Container(
+            padding=ft.padding.symmetric(horizontal=14, vertical=12),
+            border_radius=16,
+            bgcolor=ft.colors.with_opacity(0.14, "#0a1117"),
+            border=ft.border.all(
+                1,
+                ft.colors.with_opacity(0.28, BORDER_COLOR),
+            ),
+            content=ft.Row([
+                ft.Container(
+                    width=86,
+                    content=ft.Column([
+                        ft.Text(
+                            row_data.get('symbol', '---'),
+                            size=13,
+                            weight="bold",
+                            color=TEXT_PRIMARY,
+                        ),
+                        ft.Text(
+                            row_data.get('side_label', 'Сделка'),
+                            size=10,
+                            color=TEXT_SECONDARY,
+                        ),
+                    ], spacing=2),
+                ),
+                ft.Container(width=12),
+                ft.Container(
+                    width=170,
+                    content=ft.Column([
+                        ft.Text(
+                            f"{row_data.get('actual_exchange', 'Нет данных')} -> "
+                            f"{row_data.get('best_exchange', 'Нет данных')}",
+                            size=11,
+                            color=TEXT_PRIMARY,
+                        ),
+                        ft.Text(
+                            f"Цена {row_data.get('actual_price', 0.0):,.4f} | "
+                            f"лучшая {row_data.get('best_possible_price', 0.0):,.4f}",
+                            size=10,
+                            color=TEXT_SECONDARY,
+                        ),
+                    ], spacing=2),
+                ),
+                ft.Container(width=12),
+                ft.Container(
+                    width=130,
+                    content=ft.Column([
+                        ft.Text(
+                            f"Потери ${row_data.get('avoidable_loss', 0.0):,.2f}",
+                            size=11,
+                            weight="bold",
+                            color=status_color,
+                        ),
+                        ft.Text(
+                            f"Качество {row_data.get('execution_quality_score', 0.0):.0f}%",
+                            size=10,
+                            color=TEXT_SECONDARY,
+                        ),
+                    ], spacing=2),
+                ),
+                ft.Container(expand=True),
+                ft.Container(
+                    padding=ft.padding.symmetric(horizontal=10, vertical=6),
+                    border_radius=999,
+                    bgcolor=ft.colors.with_opacity(0.12, status_color),
+                    border=ft.border.all(
+                        1,
+                        ft.colors.with_opacity(0.24, status_color),
+                    ),
+                    content=ft.Text(
+                        row_data.get('status', 'Нет данных'),
+                        size=10,
+                        weight="bold",
+                        color=status_color,
+                    ),
+                ),
+            ], vertical_alignment="center"),
         )
 
     header_divider = ft.Container(
@@ -601,20 +767,30 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                     PRIMARY_COLOR,
                 ),
                 create_stress_metric(
-                    "ИЗБЫТОЧНЫЕ ПОТЕРИ",
-                    decision_loss_text,
+                    "ПОТЕРИ ЗА 30 ДНЕЙ",
+                    decision_month_loss_text,
                     ft.Text(
-                        "упущено из-за неидеального выбора",
+                        "избыточные расходы за последний месяц",
                         size=10,
                         color=TEXT_SECONDARY,
                     ),
                     ACCENT_COLOR,
                 ),
                 create_stress_metric(
-                    "ЧАЩЕ ВСЕГО ПРОБЛЕМА",
-                    decision_worst_exchange_text,
+                    "ОБЩИЕ ИЗБЫТОЧНЫЕ ПОТЕРИ",
+                    decision_loss_text,
                     ft.Text(
-                        "где чаще всего теряется качество",
+                        "накопленный эффект неидеального выбора",
+                        size=10,
+                        color=TEXT_SECONDARY,
+                    ),
+                    ACCENT_COLOR,
+                ),
+                create_stress_metric(
+                    "НЕВЫГОДНЫЕ ПОКУПКИ",
+                    decision_worst_buy_exchange_text,
+                    ft.Text(
+                        "где чаще всего переплачивается вход",
                         size=10,
                         color=TEXT_SECONDARY,
                     ),
@@ -632,16 +808,109 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                 ),
             ], spacing=12),
             ft.Container(height=12),
-            ft.Container(
-                padding=ft.padding.symmetric(horizontal=14, vertical=12),
-                border_radius=16,
-                bgcolor=ft.colors.with_opacity(0.14, "#0a1117"),
-                border=ft.border.all(
-                    1,
-                    ft.colors.with_opacity(0.30, BORDER_COLOR),
+            ft.Row([
+                ft.Container(
+                    expand=3,
+                    height=360,
+                    padding=16,
+                    border_radius=18,
+                    bgcolor=ft.colors.with_opacity(0.14, "#0a1117"),
+                    border=ft.border.all(
+                        1,
+                        ft.colors.with_opacity(0.30, BORDER_COLOR),
+                    ),
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Text(
+                                "ПОВЕДЕНЧЕСКИЕ СИГНАЛЫ",
+                                size=10,
+                                weight="bold",
+                                color=TEXT_SECONDARY,
+                            ),
+                            ft.Container(expand=True),
+                            ft.Text(
+                                "как пользователь выбирает площадку",
+                                size=10,
+                                color=TEXT_SECONDARY,
+                            ),
+                        ], vertical_alignment="center"),
+                        ft.Container(height=12),
+                        ft.Column([
+                            create_decision_signal(
+                                "ТОЧНОСТЬ ПО ЦЕНЕ",
+                                decision_best_price_rate_text,
+                                "как часто выбрана лучшая цена",
+                                PRIMARY_COLOR,
+                            ),
+                            create_decision_signal(
+                                "СОВПАДЕНИЕ С ЛИКВИДНОСТЬЮ",
+                                decision_liquidity_rate_text,
+                                "как часто совпадает с лучшей глубиной",
+                                SECONDARY_COLOR,
+                            ),
+                            create_decision_signal(
+                                "НЕИДЕАЛЬНЫЕ СДЕЛКИ",
+                                decision_suboptimal_rate_text,
+                                "доля сделок с упущенной выгодой",
+                                WARNING_COLOR,
+                            ),
+                        ], spacing=10, expand=True),
+                        ft.Container(height=12),
+                        ft.Container(
+                            padding=ft.padding.symmetric(horizontal=14, vertical=12),
+                            border_radius=16,
+                            bgcolor=ft.colors.with_opacity(0.10, PRIMARY_COLOR),
+                            border=ft.border.all(
+                                1,
+                                ft.colors.with_opacity(0.22, PRIMARY_COLOR),
+                            ),
+                            content=decision_hint_text,
+                        ),
+                    ], spacing=0, expand=True, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ),
-                content=decision_hint_text,
-            ),
+                ft.Container(width=12),
+                ft.Container(
+                    expand=4,
+                    height=360,
+                    padding=16,
+                    border_radius=18,
+                    bgcolor=ft.colors.with_opacity(0.14, "#0a1117"),
+                    border=ft.border.all(
+                        1,
+                        ft.colors.with_opacity(0.30, BORDER_COLOR),
+                    ),
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Column([
+                                ft.Text(
+                                    "ЖУРНАЛ РЕШЕНИЙ",
+                                    size=10,
+                                    weight="bold",
+                                    color=TEXT_SECONDARY,
+                                ),
+                                ft.Text(
+                                    "последние сделки и сравнение с лучшей альтернативой",
+                                    size=11,
+                                    color=TEXT_SECONDARY,
+                                ),
+                            ], spacing=4),
+                            ft.Container(expand=True),
+                            ft.Container(
+                                padding=ft.padding.symmetric(horizontal=10, vertical=6),
+                                border_radius=999,
+                                bgcolor=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
+                                border=ft.border.all(
+                                    1,
+                                    ft.colors.with_opacity(0.22, PRIMARY_COLOR),
+                                ),
+                                content=decision_history_caption_text,
+                            ),
+                        ], vertical_alignment="center"),
+                        ft.Container(height=12),
+                        decision_history_rows,
+                    ], spacing=0, expand=True),
+                ),
+            ], spacing=0),
         ], spacing=0),
     )
 
@@ -795,26 +1064,100 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
         )
 
         decision_summary = get_user_decision_quality_summary(user.id)
+        decision_history = get_user_trade_decision_history(user.id, limit=5)
         decision_quality = decision_summary.get('quality_score', 0.0)
         decision_quality_text.value = f"{decision_quality:.0f}%"
+        decision_month_loss_text.value = (
+            f"${decision_summary.get('avoidable_loss_month', 0.0):,.2f}"
+        )
         decision_loss_text.value = (
             f"${decision_summary.get('avoidable_loss_total', 0.0):,.2f}"
         )
         decision_worst_exchange_text.value = format_exchange_name(
             decision_summary.get('worst_exchange')
         )
+        decision_worst_buy_exchange_text.value = format_exchange_name(
+            decision_summary.get('worst_buy_exchange')
+        )
         decision_best_exchange_text.value = format_exchange_name(
             decision_summary.get('best_exchange')
         )
-        decision_hint_text.value = (
-            f"{decision_summary.get('worst_side_label', 'Нет данных')}"
-            f" · сделок в анализе: {decision_summary.get('records_count', 0)}"
+        decision_best_price_rate_text.value = (
+            f"{decision_summary.get('best_price_pick_rate', 0.0):.0f}%"
         )
+        decision_liquidity_rate_text.value = (
+            f"{decision_summary.get('liquidity_alignment_rate', 0.0):.0f}%"
+        )
+        decision_suboptimal_rate_text.value = (
+            f"{decision_summary.get('suboptimal_rate', 0.0):.0f}%"
+        )
+        dominant_issue_exchange = (
+            decision_summary.get('worst_buy_exchange')
+            or decision_summary.get('worst_exchange')
+        )
+        if decision_summary.get('records_count', 0) > 0 and dominant_issue_exchange:
+            dominant_side_label = (
+                'покупки'
+                if decision_summary.get('worst_side_label') == 'Чаще ошибается на покупках'
+                else 'продажи'
+            )
+            decision_hint_text.value = (
+                f"Чаще всего невыгодные {dominant_side_label} происходят на "
+                f"{format_exchange_name(dominant_issue_exchange)}"
+                f" · сделок в анализе: {decision_summary.get('records_count', 0)}"
+            )
+        else:
+            decision_hint_text.value = "История решений появится после первых сделок"
         decision_loss_text.color = (
             ACCENT_COLOR
             if decision_summary.get('avoidable_loss_total', 0.0) > 0.01
             else SUCCESS_COLOR
         )
+        decision_month_loss_text.color = (
+            ACCENT_COLOR
+            if decision_summary.get('avoidable_loss_month', 0.0) > 0.01
+            else SUCCESS_COLOR
+        )
+        if decision_summary.get('best_exchange'):
+            decision_history_caption_text.value = (
+                f"Лучшие сделки по исполнению: "
+                f"{format_exchange_name(decision_summary.get('best_exchange'))}"
+            )
+        else:
+            decision_history_caption_text.value = (
+                "Журнал автоматически заполнится после первых ордеров"
+            )
+        decision_history_rows.controls.clear()
+        if decision_history:
+            for row in decision_history:
+                decision_history_rows.controls.append(
+                    create_decision_history_row(row)
+                )
+        else:
+            decision_history_rows.controls.append(
+                ft.Container(
+                    padding=ft.padding.symmetric(horizontal=14, vertical=18),
+                    border_radius=16,
+                    bgcolor=ft.colors.with_opacity(0.10, "#0a1117"),
+                    border=ft.border.all(
+                        1,
+                        ft.colors.with_opacity(0.26, BORDER_COLOR),
+                    ),
+                    content=ft.Row([
+                        ft.Icon(
+                            ft.icons.INSIGHTS_OUTLINED,
+                            size=20,
+                            color=TEXT_SECONDARY,
+                        ),
+                        ft.Container(width=10),
+                        ft.Text(
+                            "После первых сделок здесь появится история решений пользователя",
+                            size=11,
+                            color=TEXT_SECONDARY,
+                        ),
+                    ], vertical_alignment="center"),
+                )
+            )
     
     # ============ HEADER ============
     header = ft.Container(

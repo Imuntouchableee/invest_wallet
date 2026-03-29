@@ -1,8 +1,14 @@
 import ast
+from datetime import datetime, timedelta
 
 from backend.liquidity_analyzer import analyze_liquidity, load_liquidity_profiles
 from backend.models import TradeDecisionHistory, session
-from ui.config import EXCHANGE_NAMES
+
+EXCHANGE_NAMES = {
+    'bybit': 'Bybit',
+    'gateio': 'Gate.io',
+    'mexc': 'MEXC',
+}
 
 
 def _safe_float(value, default=0.0):
@@ -89,6 +95,18 @@ def _serialize_alternative_prices(exchange_results):
             'filled': bool(result.get('filled')),
         }
     return str(snapshot)
+
+
+def _parse_alternative_prices(raw_value):
+    if not raw_value:
+        return {}
+    if isinstance(raw_value, dict):
+        return raw_value
+    try:
+        parsed = ast.literal_eval(raw_value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
 
 
 def record_trade_decision(
@@ -217,8 +235,13 @@ def get_user_decision_quality_summary(user_id, limit=100):
         return {
             'quality_score': 0.0,
             'avoidable_loss_total': 0.0,
+            'avoidable_loss_month': 0.0,
             'worst_exchange': None,
+            'worst_buy_exchange': None,
             'best_exchange': None,
+            'best_price_pick_rate': 0.0,
+            'liquidity_alignment_rate': 0.0,
+            'suboptimal_rate': 0.0,
             'worst_side_label': 'Нет данных',
             'records_count': 0,
         }
@@ -234,24 +257,36 @@ def get_user_decision_quality_summary(user_id, limit=100):
         return {
             'quality_score': 0.0,
             'avoidable_loss_total': 0.0,
+            'avoidable_loss_month': 0.0,
             'worst_exchange': None,
+            'worst_buy_exchange': None,
             'best_exchange': None,
+            'best_price_pick_rate': 0.0,
+            'liquidity_alignment_rate': 0.0,
+            'suboptimal_rate': 0.0,
             'worst_side_label': 'История еще не накоплена',
             'records_count': 0,
         }
 
     total_score = sum(_safe_float(item.execution_quality_score) for item in records)
     total_loss = sum(_safe_float(item.avoidable_loss) for item in records)
+    month_cutoff = datetime.now() - timedelta(days=30)
+    monthly_loss = 0.0
 
     loss_by_exchange = {}
+    buy_loss_by_exchange = {}
     score_by_exchange = {}
     count_by_exchange = {}
     side_counters = {'buy': 0, 'sell': 0}
+    best_price_hits = 0
+    liquidity_alignment_hits = 0
+    suboptimal_count = 0
 
     for item in records:
         exchange_name = item.actual_exchange
+        loss_value = _safe_float(item.avoidable_loss)
         loss_by_exchange[exchange_name] = (
-            loss_by_exchange.get(exchange_name, 0.0) + _safe_float(item.avoidable_loss)
+            loss_by_exchange.get(exchange_name, 0.0) + loss_value
         )
         score_by_exchange[exchange_name] = (
             score_by_exchange.get(exchange_name, 0.0)
@@ -259,10 +294,29 @@ def get_user_decision_quality_summary(user_id, limit=100):
         )
         count_by_exchange[exchange_name] = count_by_exchange.get(exchange_name, 0) + 1
         side_counters[item.side] = side_counters.get(item.side, 0) + 1
+        if item.side == 'buy':
+            buy_loss_by_exchange[exchange_name] = (
+                buy_loss_by_exchange.get(exchange_name, 0.0) + loss_value
+            )
+        if item.created_at and item.created_at >= month_cutoff:
+            monthly_loss += loss_value
+        if item.actual_exchange == item.best_exchange:
+            best_price_hits += 1
+        if item.actual_exchange == item.best_liquidity_exchange:
+            liquidity_alignment_hits += 1
+        if loss_value > 0.01:
+            suboptimal_count += 1
 
     worst_exchange = None
     if loss_by_exchange:
         worst_exchange = max(loss_by_exchange.items(), key=lambda item: item[1])[0]
+
+    worst_buy_exchange = None
+    if buy_loss_by_exchange:
+        worst_buy_exchange = max(
+            buy_loss_by_exchange.items(),
+            key=lambda item: item[1],
+        )[0]
 
     best_exchange = None
     if score_by_exchange:
@@ -280,11 +334,68 @@ def get_user_decision_quality_summary(user_id, limit=100):
     return {
         'quality_score': round(total_score / len(records), 2),
         'avoidable_loss_total': round(total_loss, 2),
+        'avoidable_loss_month': round(monthly_loss, 2),
         'worst_exchange': worst_exchange,
+        'worst_buy_exchange': worst_buy_exchange,
         'best_exchange': best_exchange,
+        'best_price_pick_rate': round(best_price_hits / len(records) * 100.0, 2),
+        'liquidity_alignment_rate': round(
+            liquidity_alignment_hits / len(records) * 100.0,
+            2,
+        ),
+        'suboptimal_rate': round(suboptimal_count / len(records) * 100.0, 2),
         'worst_side_label': worst_side_label,
         'records_count': len(records),
     }
+
+
+def get_user_trade_decision_history(user_id, limit=6):
+    if not user_id:
+        return []
+
+    records = (
+        session.query(TradeDecisionHistory)
+        .filter_by(user_id=user_id)
+        .order_by(TradeDecisionHistory.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    history = []
+    for item in records:
+        alternatives = _parse_alternative_prices(item.alternative_prices)
+        alternatives_count = len(alternatives)
+        side_label = 'Покупка' if item.side == 'buy' else 'Продажа'
+        history.append({
+            'created_at': item.created_at,
+            'symbol': item.symbol,
+            'side': item.side,
+            'side_label': side_label,
+            'actual_exchange': format_exchange_name(item.actual_exchange),
+            'best_exchange': format_exchange_name(item.best_exchange),
+            'best_liquidity_exchange': format_exchange_name(
+                item.best_liquidity_exchange
+            ),
+            'actual_price': round(_safe_float(item.actual_price), 8),
+            'best_possible_price': round(_safe_float(item.best_possible_price), 8),
+            'amount': round(_safe_float(item.amount), 8),
+            'avoidable_loss': round(_safe_float(item.avoidable_loss), 4),
+            'execution_quality_score': round(
+                _safe_float(item.execution_quality_score),
+                2,
+            ),
+            'liquidity_alignment_score': round(
+                _safe_float(item.liquidity_alignment_score),
+                2,
+            ),
+            'alternatives_count': alternatives_count,
+            'status': (
+                'Оптимально'
+                if _safe_float(item.avoidable_loss) <= 0.01
+                else 'Есть резерв'
+            ),
+        })
+    return history
 
 
 def format_exchange_name(exchange_name):
