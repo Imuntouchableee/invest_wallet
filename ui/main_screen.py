@@ -1036,6 +1036,8 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
         ], vertical_alignment="center"),
     )
 
+
+
     def apply_portfolio_summary(portfolio_data: dict):
         level_name, level_color, _level_icon = get_user_level(portfolio_data['total_usd'])
         level_chip_text.value = level_name
