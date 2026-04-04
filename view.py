@@ -25,6 +25,8 @@ from ui.dialogs import (
 from ui.trading import show_trading_dialog
 from ui.profile import show_profile_page
 from ui.assets_page import show_assets_page
+from ui.trades_history import show_trades_history_page
+from ui.portfolio_risk_page import show_portfolio_risk_page
 from ui.main_screen import show_main_screen, show_no_exchanges_screen
 
 
@@ -104,6 +106,7 @@ def main(page: ft.Page):
             show_exchange_settings_callback=_show_exchange_settings,
             show_no_exchanges_callback=_show_no_exchanges,
             show_assets_page_callback=_show_assets_page,
+            show_portfolio_risk_callback=_show_portfolio_risk,
         )
 
     def _show_assets_page():
@@ -113,6 +116,23 @@ def main(page: ft.Page):
             portfolio_cache=portfolio_cache,
             show_main_screen_callback=_show_main,
             show_trading_callback=_show_trading,
+            show_trades_history_callback=_show_trades_history,
+            show_portfolio_risk_callback=_show_portfolio_risk,
+        )
+    
+    def _show_trades_history():
+        show_trades_history_page(
+            page=page,
+            current_user=current_user,
+            show_assets_callback=_show_assets_page,
+        )
+    
+    def _show_portfolio_risk():
+        show_portfolio_risk_page(
+            page=page,
+            current_user=current_user,
+            portfolio_data=portfolio_cache.get("data"),
+            show_main_callback=_show_main,
         )
     
     def _show_no_exchanges():

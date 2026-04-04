@@ -13,6 +13,7 @@ from ui.config import (
     EXCHANGE_COLORS,
     EXCHANGE_NAMES,
     PRIMARY_COLOR,
+    SECONDARY_COLOR,
     SUCCESS_COLOR,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
@@ -122,6 +123,8 @@ def show_assets_page(
     portfolio_cache: dict,
     show_main_screen_callback,
     show_trading_callback,
+    show_trades_history_callback,
+    show_portfolio_risk_callback=None,
 ):
     user = current_user.get("user")
     if not user:
@@ -215,6 +218,17 @@ def show_assets_page(
             bgcolor=PRIMARY_COLOR,
             color=DARK_BG,
             padding=ft.padding.symmetric(horizontal=18, vertical=16),
+            shape=ft.RoundedRectangleBorder(radius=14),
+        ),
+    )
+    
+    trades_history_button = ft.ElevatedButton(
+        "История сделок",
+        icon=ft.icons.HISTORY_ROUNDED,
+        style=ft.ButtonStyle(
+            bgcolor=SECONDARY_COLOR,
+            color=DARK_BG,
+            padding=ft.padding.symmetric(horizontal=25, vertical=16),
             shape=ft.RoundedRectangleBorder(radius=14),
         ),
     )
@@ -323,6 +337,7 @@ def show_assets_page(
     buy_button.on_click = lambda e: _open_trading("buy")
     sell_button.on_click = lambda e: _open_trading("sell")
     refresh_button.on_click = _refresh_portfolio
+    trades_history_button.on_click = lambda e: show_trades_history_callback()
 
     def _build_filter_button(filter_name, title, color):
         button_title = ft.Text(title, size=13, weight="bold", color=TEXT_SECONDARY)
@@ -699,6 +714,8 @@ def show_assets_page(
                     updated_time_text,
                     ft.Container(height=12),
                     refresh_button,
+                    ft.Container(height=10),
+                    trades_history_button,
                 ], spacing=0),
             ),
         ], spacing=0),
@@ -715,17 +732,6 @@ def show_assets_page(
                     hero_title,
                     hero_subtitle,
                 ], spacing=4, expand=True),
-                ft.Container(
-                    padding=ft.padding.symmetric(horizontal=14, vertical=10),
-                    border_radius=999,
-                    bgcolor=ft.colors.with_opacity(0.12, PRIMARY_COLOR),
-                    content=ft.Text(
-                        "Flet 0.24 • adaptive scroll",
-                        size=11,
-                        weight="bold",
-                        color=PRIMARY_COLOR,
-                    ),
-                ),
             ], vertical_alignment="center"),
             ft.Container(height=16),
             ft.Container(

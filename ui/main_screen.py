@@ -20,6 +20,7 @@ from backend.decision_quality_analyzer import (
     get_user_decision_quality_summary,
     get_user_trade_decision_history,
 )
+from backend.portfolio_history_service import store_portfolio_snapshot
 from backend.stress_sell_analyzer import analyze_portfolio_stress_sell
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ def show_no_exchanges_screen(page: ft.Page, show_add_exchange_callback, logout_c
 def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                      show_login_callback, show_profile_callback, show_trading_callback,
                      show_logout_confirm_callback, show_exchange_settings_callback,
-                     show_no_exchanges_callback, show_assets_page_callback):
+                     show_no_exchanges_callback, show_assets_page_callback, show_portfolio_risk_callback):
     """Главный экран с портфелем"""
     user = current_user["user"]
     if not user:
@@ -128,6 +129,7 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
     portfolio = fetch_user_portfolio(user_keys)
     portfolio_cache["data"] = portfolio
     portfolio_cache["timestamp"] = datetime.now()
+    store_portfolio_snapshot(user.id, portfolio)
 
     page.controls.clear()
 
@@ -953,7 +955,46 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                     color=TEXT_SECONDARY,
                 ),
             ], spacing=6, expand=True),
-            ft.Container(width=18),
+            ft.Container(width=12),
+            ft.Container(
+                width=260,
+                padding=ft.padding.symmetric(horizontal=16, vertical=14),
+                border_radius=18,
+                bgcolor=ft.colors.with_opacity(0.12, SECONDARY_COLOR),
+                border=ft.border.all(
+                    1,
+                    ft.colors.with_opacity(0.32, SECONDARY_COLOR),
+                ),
+                ink=True,
+                on_click=lambda e: show_portfolio_risk_callback(),
+                content=ft.Row([
+                    ft.Icon(
+                        ft.icons.ANALYTICS_ROUNDED,
+                        size=22,
+                        color=SECONDARY_COLOR,
+                    ),
+                    ft.Container(width=10),
+                    ft.Column([
+                        ft.Text(
+                            "Анализ рисков",
+                            size=15,
+                            weight="bold",
+                            color=TEXT_PRIMARY,
+                        ),
+                        ft.Text(
+                            "индекс устойчивости портфеля",
+                            size=10,
+                            color=TEXT_SECONDARY,
+                        ),
+                    ], spacing=3, expand=True),
+                    ft.Icon(
+                        ft.icons.ARROW_FORWARD_ROUNDED,
+                        size=20,
+                        color=SECONDARY_COLOR,
+                    ),
+                ], vertical_alignment="center"),
+            ),
+            ft.Container(width=12),
             ft.Container(
                 width=260,
                 padding=ft.padding.symmetric(horizontal=16, vertical=14),
@@ -1695,6 +1736,10 @@ def show_main_screen(page: ft.Page, current_user: dict, portfolio_cache: dict,
                     portfolio_new = fetch_user_portfolio(user_keys_refresh)
                     portfolio_cache["data"] = portfolio_new
                     portfolio_cache["timestamp"] = datetime.now()
+                    store_portfolio_snapshot(
+                        current_user["user"].id,
+                        portfolio_new,
+                    )
                     render_portfolio(portfolio_new)
                     logger.info(f"[OK] Портфель обновлён. Общая стоимость: ${portfolio_new['total_usd']:,.2f}")
             except Exception as e:
