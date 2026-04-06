@@ -71,6 +71,17 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     current_user_id = (
         current_user["user"].id if current_user.get("user") else None
     )
+    mount_state = {"dialog_mounted": False}
+
+    def safe_page_update(force: bool = False):
+        if not force and not mount_state["dialog_mounted"]:
+            return
+        try:
+            page.update()
+        except AssertionError:
+            logger.exception(
+                "[TRADING] Skipped page.update(): dialog controls are not mounted yet"
+            )
 
     def to_float(value, default=0.0):
         try:
@@ -153,7 +164,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         except Exception:
             pass
         dialog.open = False
-        page.update()
+        safe_page_update(force=True)
     
     # ==================== СОСТОЯНИЕ И ПОДСКАЗКИ ====================
     status_message = ft.Container(visible=False)
@@ -188,7 +199,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             ft.colors.with_opacity(0.3, color),
         )
         status_message.visible = True
-        page.update()
+        safe_page_update()
     
     # ==================== ЦВЕТА ====================
     BUY_COLOR = "#00C853"
@@ -280,7 +291,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         }.get(current_exchange, current_exchange.upper())
         load_symbols(current_exchange, current_symbol)
         update_available()
-        page.update()
+        safe_page_update()
 
     def on_symbol_changed(value):
         nonlocal current_symbol, coin_name, initial_prefill_pending, last_edited_field
@@ -346,7 +357,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             recalculate_inputs()
         except NameError:
             pass
-        page.update()
+        safe_page_update()
 
     def get_available_balance_value():
         if side_selector_value == 'sell':
@@ -362,7 +373,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     def update_available():
         avail, label_asset = get_available_balance_value()
         available_text.value = f"{avail:.6f} {label_asset}"
-        page.update()
+        safe_page_update()
 
     # dropdownы
     exchange_dropdown = ft.Dropdown(
@@ -553,7 +564,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             update_action_button()
         except NameError:
             pass
-        page.update()
+        safe_page_update()
 
     # кнопки, которые будут изменяться
     buy_btn = ft.Container(
@@ -698,7 +709,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
             commission_summary.value = "$0.00"
             total_summary.value = "$0.00"
             total_equiv.value = "≈ $0.00"
-        page.update()
+        safe_page_update()
 
     def sync_from_quantity():
         nonlocal input_sync_in_progress
@@ -927,7 +938,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         # обновляем UI
         update_action_button()
         recalculate_inputs()
-        page.update()
+        safe_page_update()
 
     def percent_select(pct: float):
         nonlocal last_edited_field
@@ -976,7 +987,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         except NameError:
             pass
         update_summary()
-        page.update()
+        safe_page_update()
 
     def clear_percent_highlight():
         try:
@@ -1127,7 +1138,7 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
         text_ctrl.value = f"{('КУПИТЬ' if buy_active else 'ПРОДАТЬ')} {coin_name}"
         action_button.bgcolor = action_color
         action_button.shadow.color = ft.colors.with_opacity(0.5, action_color)
-        page.update()
+        safe_page_update()
 
     def execute_order(e):
         # собираем параметры для отправки через backend.api.create_order
@@ -1303,4 +1314,5 @@ def show_trading_dialog(page: ft.Page, current_user: dict, user_keys: list,
     
     page.overlay.append(dialog)
     dialog.open = True
-    page.update()
+    mount_state["dialog_mounted"] = True
+    safe_page_update(force=True)

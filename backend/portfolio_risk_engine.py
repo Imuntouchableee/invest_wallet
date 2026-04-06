@@ -379,18 +379,31 @@ class PortfolioRiskAnalyzer:
         if not assets:
             return {"risk_level": "LOW", "score": 100.0, "description": "Нет данных"}
 
-        asset_distribution = []
-        total_value = sum(_safe_float(asset.get("value_usd")) for asset in assets)
+        aggregated_assets = {}
+        total_value = 0.0
+        for asset in assets:
+            value_usd = _safe_float(asset.get("value_usd"))
+            if value_usd <= 0:
+                continue
+            asset_name = str(asset.get("currency", "")).upper() or "UNKNOWN"
+            total_value += value_usd
+            aggregated_assets.setdefault(
+                asset_name,
+                {"name": asset_name, "value": 0.0},
+            )
+            aggregated_assets[asset_name]["value"] += value_usd
+
         if total_value <= 0:
             return {"risk_level": "LOW", "score": 100.0, "description": "Портфель пуст"}
 
-        for asset in assets:
-            value_usd = _safe_float(asset.get("value_usd"))
+        asset_distribution = []
+        for asset_name, payload in aggregated_assets.items():
+            value_usd = _safe_float(payload.get("value"))
             asset_distribution.append(
                 {
-                    "name": str(asset.get("currency", "")).upper(),
+                    "name": asset_name,
                     "percentage": _safe_div(value_usd * 100.0, total_value),
-                    "value": value_usd,
+                    "value": round(value_usd, 2),
                 }
             )
         asset_distribution.sort(key=lambda item: item["percentage"], reverse=True)
